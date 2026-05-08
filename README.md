@@ -30,6 +30,63 @@ The system does not only predict stress or emotion labels. It also provides expl
 
 ---
 
+## Repository Structure
+
+```text
+R26-IT-036/
+├── ai_components/
+│   └── c3_text_stressor_distortion/
+│       └── Stress header/
+│           ├── dreaddit_eda.ipynb
+│           ├── dreaddit_preprocessing.ipynb
+│           ├── evaluation/
+│           │   ├── error_analysis/
+│           │   │   └── error_analysis.ipynb
+│           │   └── metrics/
+│           │       └── model_comparism.ipynb
+│           └── train/
+│               ├── augmentation.py
+│               ├── baselines.py
+│               ├── config.py
+│               ├── dataset.py
+│               ├── kfold.py
+│               ├── model.py
+│               ├── train.py
+│               ├── train_modal.py
+│               ├── trainer.py
+│               ├── tuner.py
+│               └── utils.py
+├── backend/
+├── data/
+│   └── Stress header/
+│       ├── README.md
+│       ├── raw/
+│       │   └── Dreaddit/
+│       └── processed/
+├── docs/
+│   ├── proposal/
+│   └── research_notes/
+├── frontend/
+├── models/
+│   └── c3_text_stressor_distortion/
+│       └── Stress header/
+├── reports/
+│   └── c3_text_stressor_distortion/
+│       └── Stress header/
+│           ├── eda_outputs/
+│           └── evaluation/
+│               ├── error_analysis/
+│               └── metrics/
+├── test/
+├── .gitignore
+├── README.md
+└── requirements.txt
+```
+
+The `data/raw`, `data/processed`, `models`, and `reports` directories contain generated or large research artifacts and are excluded from version control by `.gitignore`.
+
+---
+
 ## Main Research Objective
 
 The main objective of this research is to design and develop an explainable multimodal AI system that can detect stress and emotional states from physiological signals, speech, and text, and generate supportive dialogue responses using emotion forecasting and strategy-guided response generation.
