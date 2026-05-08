@@ -425,11 +425,7 @@ The research team acknowledges the guidance and support provided by the Departme
 
 This repository is intended for academic research purposes. An appropriate open-source license can be added before public release.
 
-Suggested license:
 
-```text
-MIT License
-```
 
 ---
 
