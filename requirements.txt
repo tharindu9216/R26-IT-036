@@ -1,0 +1,29 @@
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+# Core data processing
+numpy==1.26.4
+pandas==2.2.2
+pyarrow==15.0.2
+python-dotenv==1.0.1
+
+# Machine learning and evaluation
+scikit-learn==1.4.2
+scipy==1.13.0
+optuna==3.6.1
+
+# Deep learning and transformer models
+torch==2.3.0
+transformers==4.40.0
+sentencepiece==0.2.0
+protobuf==4.25.3
+huggingface-hub==0.23.0
+
+# Visualization and notebook analysis
+matplotlib==3.8.4
+seaborn==0.13.2
+ipython==8.24.0
+jupyter==1.0.0
+ipykernel==6.29.4
+
+# Cloud training
+modal==0.62.45
