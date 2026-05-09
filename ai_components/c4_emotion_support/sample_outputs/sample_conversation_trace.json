@@ -1,0 +1,35 @@
+{
+  "user_message": "I feel really nervous about my exams.",
+  "current_emotion": "fear",
+  "current_emotion_confidence": 0.88,
+  "current_emotion_probabilities": {
+    "neutral": 0.02,
+    "joy": 0.02,
+    "sadness": 0.05,
+    "anger": 0.01,
+    "fear": 0.88,
+    "surprise": 0.01,
+    "disgust": 0.01
+  },
+  "previous_emotion": "sadness",
+  "deviation_score": 0.6,
+  "deviation_level": "Moderate",
+  "forecasted_next_emotion": "fear",
+  "forecast_confidence": 0.72,
+  "forecast_probabilities": {
+    "neutral": 0.05,
+    "joy": 0.03,
+    "sadness": 0.1,
+    "anger": 0.05,
+    "fear": 0.72,
+    "surprise": 0.03,
+    "disgust": 0.02
+  },
+  "selected_strategy": "Reassure",
+  "strategy_reason": "Fear or high emotional deviation was detected, so reassurance is selected.",
+  "supportive_response": "It makes sense to feel unsettled. Try to focus on the next small thing you can control right now, and we can work through it calmly.",
+  "safety": {
+    "risk_detected": false,
+    "risk_type": "none"
+  }
+}

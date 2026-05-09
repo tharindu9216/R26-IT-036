@@ -1,0 +1,11 @@
+streamlit==1.36.0
+starlette==0.37.2
+transformers
+torch
+numpy
+pandas
+scikit-learn
+plotly
+joblib
+peft
+accelerate
