@@ -60,21 +60,29 @@ class EmotionForecaster:
     def _rule_based_forecast(
         self, current_emotion: str, history: List[str], deviation_level: str
     ) -> Dict[str, object]:
+        negative_mix = {
+            "sadness": "depression-tinged sadness",
+            "anger": "irritable frustration",
+            "fear": "anxious fear",
+            "disgust": "burnout-tinged disgust",
+        }
+
         if current_emotion in POSITIVE:
-            label = "joy"
+            label = "hopeful joy"
             confidence = 0.7
         elif current_emotion in NEUTRAL:
-            label = "neutral" if not history else history[-1]
+            base = history[-1] if history else "neutral"
+            label = f"steady {base}"
             confidence = 0.6
         elif current_emotion in NEGATIVE:
             if deviation_level == "High":
-                label = "fear"
+                label = "anxious fear"
                 confidence = 0.65
             else:
-                label = current_emotion
+                label = negative_mix.get(current_emotion, f"anxious {current_emotion}")
                 confidence = 0.7
         else:
-            label = "neutral"
+            label = "uneasy neutral"
             confidence = 0.55
 
         probabilities = self._build_probabilities(label, confidence)
