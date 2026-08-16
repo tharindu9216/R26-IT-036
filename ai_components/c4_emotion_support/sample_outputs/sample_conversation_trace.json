@@ -1,35 +1,988 @@
 {
-  "user_message": "I feel really nervous about my exams.",
-  "current_emotion": "fear",
-  "current_emotion_confidence": 0.88,
-  "current_emotion_probabilities": {
-    "neutral": 0.02,
-    "joy": 0.02,
-    "sadness": 0.05,
-    "anger": 0.01,
-    "fear": 0.88,
-    "surprise": 0.01,
-    "disgust": 0.01
+  "generated_by": "c4_emotion_support/smoke_test.py pipeline, textcnn forecaster",
+  "classifier": {
+    "available": true,
+    "fallback": false,
+    "model_path": "C:\\Users\\Naveen Jayathilake\\Desktop\\MP\\R26-IT-036\\ai_components\\c4_emotion_support\\models\\current_emotion_classifier",
+    "model_name": "roberta",
+    "device": "cuda",
+    "labels": [
+      "neutral",
+      "anger",
+      "fear",
+      "joy",
+      "sadness"
+    ],
+    "load_error": null
   },
-  "previous_emotion": "sadness",
-  "deviation_score": 0.6,
-  "deviation_level": "Moderate",
-  "forecasted_next_emotion": "fear",
-  "forecast_confidence": 0.72,
-  "forecast_probabilities": {
-    "neutral": 0.05,
-    "joy": 0.03,
-    "sadness": 0.1,
-    "anger": 0.05,
-    "fear": 0.72,
-    "surprise": 0.03,
-    "disgust": 0.02
+  "forecaster": {
+    "available": true,
+    "fallback": false,
+    "model_path": "C:\\Users\\Naveen Jayathilake\\Desktop\\MP\\R26-IT-036\\ai_components\\c4_emotion_support\\models\\next_emotion_forecaster",
+    "model_type": "textcnn",
+    "architecture": "textcnn",
+    "device": "cuda",
+    "labels": [
+      "angry",
+      "anxious",
+      "calm",
+      "excited",
+      "happy",
+      "neutral",
+      "sad",
+      "stressed"
+    ],
+    "vocab_size": 528,
+    "max_len": 64,
+    "context_turns": 3,
+    "load_error": null
   },
-  "selected_strategy": "Reassure",
-  "strategy_reason": "Fear or high emotional deviation was detected, so reassurance is selected.",
-  "supportive_response": "It makes sense to feel unsettled. Try to focus on the next small thing you can control right now, and we can work through it calmly.",
-  "safety": {
-    "risk_detected": false,
-    "risk_type": "none"
-  }
+  "turns": [
+    {
+      "user_message": "I feel sad and stressed about my exams.",
+      "current_emotion": "sadness",
+      "current_emotion_confidence": 0.9671126008033752,
+      "current_emotion_probabilities": {
+        "neutral": 0.004113657400012016,
+        "anger": 0.008816306479275227,
+        "fear": 0.01667046919465065,
+        "joy": 0.0032870222348719835,
+        "sadness": 0.9671126008033752
+      },
+      "current_emotion_source": "model",
+      "previous_emotion": null,
+      "deviation_score": 0.0,
+      "deviation_level": "None",
+      "forecasted_next_emotion": "sad",
+      "forecasted_next_emotion_projected": "sadness",
+      "forecast_confidence": 0.6250389814376831,
+      "forecast_probabilities": {
+        "angry": 0.041328538209199905,
+        "anxious": 0.12364071607589722,
+        "calm": 0.00709137786179781,
+        "excited": 0.004358789883553982,
+        "happy": 0.006036556325852871,
+        "neutral": 0.014355766586959362,
+        "sad": 0.6250389814376831,
+        "stressed": 0.1781492680311203
+      },
+      "forecast_probabilities_projected": {
+        "neutral": 0.02144714444875717,
+        "anger": 0.041328538209199905,
+        "fear": 0.3017899841070175,
+        "joy": 0.010395346209406853,
+        "sadness": 0.6250389814376831
+      },
+      "forecast_source": "textcnn",
+      "forecast_context_text": "[user] I feel sad and stressed about my exams.",
+      "forecast_unk_rate": 0.3,
+      "forecast_aux_emotion": "sad",
+      "selected_strategy": "Comfort",
+      "strategy_reason": "Low mood with a likely negative next emotion suggests a comforting response.",
+      "supportive_response": "I am sorry you are feeling this way. That sounds difficult, but you do not have to process everything at once. Let us take it step by step.",
+      "safety": {
+        "risk_detected": false,
+        "risk_type": "none",
+        "matched_phrases": []
+      },
+      "explanations": {
+        "strategy_rules": [
+          {
+            "strategy": "Safe Fallback",
+            "condition": "safety_risk_detected",
+            "fired": false,
+            "reached": true
+          },
+          {
+            "strategy": "Comfort",
+            "condition": "current in {sadness, disgust} and forecast in {sadness, fear}",
+            "fired": true,
+            "reached": true
+          },
+          {
+            "strategy": "Reassure",
+            "condition": "current == fear or deviation_level == High",
+            "fired": false,
+            "reached": false
+          },
+          {
+            "strategy": "Maintain Tone",
+            "condition": "current == neutral and forecast in {joy, neutral}",
+            "fired": false,
+            "reached": false
+          },
+          {
+            "strategy": "Encourage",
+            "condition": "current in {sadness, fear} and forecast in {neutral, joy}",
+            "fired": false,
+            "reached": false
+          }
+        ],
+        "label_mapping_note": "Forecaster label 'sad' maps to classifier label 'sadness'.",
+        "label_mapping_lossy": false,
+        "classifier": {
+          "available": true,
+          "method": "integrated_gradients",
+          "steps": 64,
+          "target_label": "sadness",
+          "target_probability": 0.9671126008033752,
+          "completeness_gap": 0.23078536987304688,
+          "completeness_gap_relative": 0.046158073223364036,
+          "token_attributions": [
+            [
+              "I",
+              0.17952192988264937
+            ],
+            [
+              "feel",
+              0.5738134773183101
+            ],
+            [
+              "sad",
+              1.0
+            ],
+            [
+              "and",
+              0.04670553685407284
+            ],
+            [
+              "stressed",
+              -0.09856347762871775
+            ],
+            [
+              "about",
+              0.0579698469028358
+            ],
+            [
+              "my",
+              0.11785573641511511
+            ],
+            [
+              "exams.",
+              0.3927127562104282
+            ]
+          ],
+          "top_tokens": [
+            [
+              "sad",
+              1.0
+            ],
+            [
+              "feel",
+              0.5738134773183101
+            ],
+            [
+              "exams.",
+              0.3927127562104282
+            ],
+            [
+              "I",
+              0.17952192988264937
+            ],
+            [
+              "my",
+              0.11785573641511511
+            ],
+            [
+              "stressed",
+              -0.09856347762871775
+            ],
+            [
+              "about",
+              0.0579698469028358
+            ],
+            [
+              "and",
+              0.04670553685407284
+            ]
+          ],
+          "occlusion": {
+            "available": true,
+            "method": "occlusion",
+            "base_probability": 0.9671124815940857,
+            "token_attributions": [
+              [
+                "I",
+                0.02585781257341965
+              ],
+              [
+                "feel",
+                0.05710792552672385
+              ],
+              [
+                "sad",
+                1.0
+              ],
+              [
+                "and",
+                0.025458228964480252
+              ],
+              [
+                "stressed",
+                0.0018209879889974445
+              ],
+              [
+                "about",
+                0.009116325638050624
+              ],
+              [
+                "my",
+                0.026394205224406588
+              ],
+              [
+                "exams.",
+                0.006642196462844688
+              ]
+            ],
+            "top_tokens": [
+              [
+                "sad",
+                1.0
+              ],
+              [
+                "feel",
+                0.05710792552672385
+              ],
+              [
+                "my",
+                0.026394205224406588
+              ],
+              [
+                "I",
+                0.02585781257341965
+              ],
+              [
+                "and",
+                0.025458228964480252
+              ],
+              [
+                "about",
+                0.009116325638050624
+              ],
+              [
+                "exams.",
+                0.006642196462844688
+              ],
+              [
+                "stressed",
+                0.0018209879889974445
+              ]
+            ]
+          }
+        },
+        "forecaster": {
+          "available": true,
+          "method": "integrated_gradients",
+          "steps": 64,
+          "architecture": "textcnn",
+          "target_label": "sad",
+          "target_probability": 0.6250389814376831,
+          "completeness_gap": 0.0022346973419189453,
+          "completeness_gap_relative": 0.0014336138003797172,
+          "token_attributions": [
+            [
+              "[user]",
+              0.2599115659450897
+            ],
+            [
+              "i",
+              1.0
+            ],
+            [
+              "feel",
+              0.8542502213348866
+            ],
+            [
+              "and",
+              0.7104281133294209
+            ],
+            [
+              "about",
+              0.7552518564482785
+            ],
+            [
+              "my",
+              0.3339397057742313
+            ],
+            [
+              ".",
+              -0.04934606308703695
+            ]
+          ],
+          "top_tokens": [
+            [
+              "i",
+              1.0
+            ],
+            [
+              "feel",
+              0.8542502213348866
+            ],
+            [
+              "about",
+              0.7552518564482785
+            ],
+            [
+              "and",
+              0.7104281133294209
+            ],
+            [
+              "my",
+              0.3339397057742313
+            ],
+            [
+              "[user]",
+              0.2599115659450897
+            ],
+            [
+              ".",
+              -0.04934606308703695
+            ]
+          ],
+          "aux_contribution": {
+            "current_emotion_feature": "sad",
+            "probability_with_feature": 0.6250389814376831,
+            "probability_without_feature": 0.42039036750793457,
+            "delta": 0.20464861392974854,
+            "prediction_without_feature": "sad",
+            "prediction_flips_without_feature": false
+          }
+        },
+        "forecaster_counterfactual": {
+          "available": true,
+          "sweep": {
+            "angry": {
+              "label": "angry",
+              "confidence": 0.40143758058547974
+            },
+            "anxious": {
+              "label": "anxious",
+              "confidence": 0.6073663830757141
+            },
+            "calm": {
+              "label": "stressed",
+              "confidence": 0.3274489641189575
+            },
+            "excited": {
+              "label": "stressed",
+              "confidence": 0.4310908019542694
+            },
+            "happy": {
+              "label": "anxious",
+              "confidence": 0.25982609391212463
+            },
+            "neutral": {
+              "label": "stressed",
+              "confidence": 0.2769777476787567
+            },
+            "sad": {
+              "label": "sad",
+              "confidence": 0.6250389814376831
+            },
+            "stressed": {
+              "label": "stressed",
+              "confidence": 0.6162773370742798
+            }
+          },
+          "distinct_outcomes": [
+            "angry",
+            "anxious",
+            "sad",
+            "stressed"
+          ],
+          "sensitivity": 0.5,
+          "note": "The forecast changes with the assumed current emotion, so the classifier's output materially drives it."
+        },
+        "forecaster_vocabulary": {
+          "available": true,
+          "vocab_size": 528,
+          "n_tokens": 10,
+          "n_unknown": 3,
+          "unknown_rate": 0.3,
+          "unknown_tokens": [
+            "exams",
+            "sad",
+            "stressed"
+          ]
+        }
+      }
+    },
+    {
+      "user_message": "I am getting really nervous that I will fail.",
+      "current_emotion": "fear",
+      "current_emotion_confidence": 0.9795469641685486,
+      "current_emotion_probabilities": {
+        "neutral": 0.003331858664751053,
+        "anger": 0.002149519743397832,
+        "fear": 0.9795469641685486,
+        "joy": 0.0038548693992197514,
+        "sadness": 0.01111685112118721
+      },
+      "current_emotion_source": "model",
+      "previous_emotion": "sadness",
+      "deviation_score": 0.6,
+      "deviation_level": "Moderate",
+      "forecasted_next_emotion": "anxious",
+      "forecasted_next_emotion_projected": "fear",
+      "forecast_confidence": 0.6511358022689819,
+      "forecast_probabilities": {
+        "angry": 0.0522773377597332,
+        "anxious": 0.6511358022689819,
+        "calm": 0.005298156291246414,
+        "excited": 0.004394650924950838,
+        "happy": 0.01801539771258831,
+        "neutral": 0.02120055817067623,
+        "sad": 0.11213523894548416,
+        "stressed": 0.13554280996322632
+      },
+      "forecast_probabilities_projected": {
+        "neutral": 0.026498714461922646,
+        "anger": 0.0522773377597332,
+        "fear": 0.7866786122322083,
+        "joy": 0.02241004863753915,
+        "sadness": 0.11213523894548416
+      },
+      "forecast_source": "textcnn",
+      "forecast_context_text": "[user] I feel sad and stressed about my exams. [supporter] I am sorry you are feeling this way. That sounds difficult, but you do not have to process everything at once. Let us take it step by step. [SEP] [user] I am getting really nervous that I will fail.",
+      "forecast_unk_rate": 0.2,
+      "forecast_aux_emotion": "anxious",
+      "selected_strategy": "Reassure",
+      "strategy_reason": "Fear or high emotional deviation was detected, so reassurance is selected.",
+      "supportive_response": "It makes sense to feel unsettled. Try to focus on the next small thing you can control right now, and we can work through it calmly.",
+      "safety": {
+        "risk_detected": false,
+        "risk_type": "none",
+        "matched_phrases": []
+      },
+      "explanations": {
+        "strategy_rules": [
+          {
+            "strategy": "Safe Fallback",
+            "condition": "safety_risk_detected",
+            "fired": false,
+            "reached": true
+          },
+          {
+            "strategy": "Comfort",
+            "condition": "current in {sadness, disgust} and forecast in {sadness, fear}",
+            "fired": false,
+            "reached": true
+          },
+          {
+            "strategy": "Reassure",
+            "condition": "current == fear or deviation_level == High",
+            "fired": true,
+            "reached": true
+          },
+          {
+            "strategy": "Maintain Tone",
+            "condition": "current == neutral and forecast in {joy, neutral}",
+            "fired": false,
+            "reached": false
+          },
+          {
+            "strategy": "Encourage",
+            "condition": "current in {sadness, fear} and forecast in {neutral, joy}",
+            "fired": false,
+            "reached": false
+          }
+        ],
+        "label_mapping_note": "Forecaster label 'anxious' maps to classifier label 'fear', which also covers stressed.",
+        "label_mapping_lossy": true,
+        "classifier": {
+          "available": true,
+          "method": "integrated_gradients",
+          "steps": 64,
+          "target_label": "fear",
+          "target_probability": 0.9795469641685486,
+          "completeness_gap": 0.04009294509887695,
+          "completeness_gap_relative": 0.007222573744882281,
+          "token_attributions": [
+            [
+              "I",
+              0.14523545160292786
+            ],
+            [
+              "am",
+              0.3347672598124255
+            ],
+            [
+              "getting",
+              0.5615488556331782
+            ],
+            [
+              "really",
+              0.8661933442175629
+            ],
+            [
+              "nervous",
+              1.0
+            ],
+            [
+              "that",
+              -0.23991173928235035
+            ],
+            [
+              "I",
+              -0.3673321604970142
+            ],
+            [
+              "will",
+              0.24775437720568563
+            ],
+            [
+              "fail.",
+              0.01154319047791097
+            ]
+          ],
+          "top_tokens": [
+            [
+              "nervous",
+              1.0
+            ],
+            [
+              "really",
+              0.8661933442175629
+            ],
+            [
+              "getting",
+              0.5615488556331782
+            ],
+            [
+              "I",
+              -0.3673321604970142
+            ],
+            [
+              "am",
+              0.3347672598124255
+            ],
+            [
+              "will",
+              0.24775437720568563
+            ],
+            [
+              "that",
+              -0.23991173928235035
+            ],
+            [
+              "I",
+              0.14523545160292786
+            ],
+            [
+              "fail.",
+              0.01154319047791097
+            ]
+          ],
+          "occlusion": {
+            "available": true,
+            "method": "occlusion",
+            "base_probability": 0.9795469641685486,
+            "token_attributions": [
+              [
+                "I",
+                0.00013659831537968315
+              ],
+              [
+                "am",
+                0.0004315970099811106
+              ],
+              [
+                "getting",
+                0.00527282914020249
+              ],
+              [
+                "really",
+                -0.0030728331903551193
+              ],
+              [
+                "nervous",
+                1.0
+              ],
+              [
+                "that",
+                0.007779814919764422
+              ],
+              [
+                "I",
+                -0.0002877872427152072
+              ],
+              [
+                "will",
+                0.003154842492037949
+              ],
+              [
+                "fail.",
+                0.0009606324745178945
+              ]
+            ],
+            "top_tokens": [
+              [
+                "nervous",
+                1.0
+              ],
+              [
+                "that",
+                0.007779814919764422
+              ],
+              [
+                "getting",
+                0.00527282914020249
+              ],
+              [
+                "will",
+                0.003154842492037949
+              ],
+              [
+                "really",
+                -0.0030728331903551193
+              ],
+              [
+                "fail.",
+                0.0009606324745178945
+              ],
+              [
+                "am",
+                0.0004315970099811106
+              ],
+              [
+                "I",
+                -0.0002877872427152072
+              ],
+              [
+                "I",
+                0.00013659831537968315
+              ]
+            ]
+          }
+        },
+        "forecaster": {
+          "available": true,
+          "method": "integrated_gradients",
+          "steps": 64,
+          "architecture": "textcnn",
+          "target_label": "anxious",
+          "target_probability": 0.6511358022689819,
+          "completeness_gap": 0.0022904276847839355,
+          "completeness_gap_relative": 0.0024743406362236976,
+          "token_attributions": [
+            [
+              "[user]",
+              0.1513671276086141
+            ],
+            [
+              "i",
+              0.8420435163601425
+            ],
+            [
+              "feel",
+              0.7903305786950451
+            ],
+            [
+              "and",
+              0.3959970263829778
+            ],
+            [
+              "about",
+              0.4819727921225117
+            ],
+            [
+              "my",
+              0.1973786125275358
+            ],
+            [
+              ".",
+              -0.035758727126713546
+            ],
+            [
+              "[supporter]",
+              0.05859319101373157
+            ],
+            [
+              "i",
+              0.22095079152800928
+            ],
+            [
+              "sorry",
+              -0.11344381572469898
+            ],
+            [
+              "you",
+              0.28938599118081104
+            ],
+            [
+              "are",
+              -0.31218461951570153
+            ],
+            [
+              "feeling",
+              -0.5124935287087751
+            ],
+            [
+              "this",
+              0.12399462758513236
+            ],
+            [
+              "way",
+              0.005347818392708064
+            ],
+            [
+              ".",
+              -0.012611824447612791
+            ],
+            [
+              "that",
+              -0.15123673488894795
+            ],
+            [
+              "sounds",
+              -1.0
+            ],
+            [
+              ",",
+              -0.4439277464104708
+            ],
+            [
+              "but",
+              -0.25801839255612274
+            ],
+            [
+              "you",
+              0.10757445127317992
+            ],
+            [
+              "do",
+              0.45488373914383917
+            ],
+            [
+              "not",
+              0.49132401513439566
+            ],
+            [
+              "have",
+              0.13287874526842944
+            ],
+            [
+              "to",
+              0.17148766352269193
+            ],
+            [
+              "everything",
+              0.5245236729087577
+            ],
+            [
+              "at",
+              0.034346740762145445
+            ],
+            [
+              ".",
+              -0.011518840107723171
+            ],
+            [
+              "take",
+              0.6663607364315601
+            ],
+            [
+              "it",
+              0.49609685140257814
+            ],
+            [
+              "step",
+              -0.09376648901579465
+            ],
+            [
+              "by",
+              0.21090362845368046
+            ],
+            [
+              "step",
+              0.003006033909289763
+            ],
+            [
+              ".",
+              -0.014010069246269304
+            ],
+            [
+              "[sep]",
+              -0.11472099791040141
+            ],
+            [
+              "[user]",
+              0.09500651480150747
+            ],
+            [
+              "i",
+              0.023474632659260065
+            ],
+            [
+              "getting",
+              -0.729991209541653
+            ],
+            [
+              "really",
+              -0.23789419625319835
+            ],
+            [
+              "nervous",
+              -0.2195576164542352
+            ],
+            [
+              "that",
+              -0.09937219324145803
+            ],
+            [
+              "i",
+              0.2322914704099691
+            ],
+            [
+              "will",
+              0.3845540638051358
+            ],
+            [
+              ".",
+              -0.006079949039099583
+            ]
+          ],
+          "top_tokens": [
+            [
+              "sounds",
+              -1.0
+            ],
+            [
+              "i",
+              0.8420435163601425
+            ],
+            [
+              "feel",
+              0.7903305786950451
+            ],
+            [
+              "getting",
+              -0.729991209541653
+            ],
+            [
+              "take",
+              0.6663607364315601
+            ],
+            [
+              "everything",
+              0.5245236729087577
+            ],
+            [
+              "feeling",
+              -0.5124935287087751
+            ],
+            [
+              "it",
+              0.49609685140257814
+            ],
+            [
+              "not",
+              0.49132401513439566
+            ],
+            [
+              "about",
+              0.4819727921225117
+            ]
+          ],
+          "aux_contribution": {
+            "current_emotion_feature": "anxious",
+            "probability_with_feature": 0.6511358022689819,
+            "probability_without_feature": 0.14530806243419647,
+            "delta": 0.5058277398347855,
+            "prediction_without_feature": "sad",
+            "prediction_flips_without_feature": true
+          }
+        },
+        "forecaster_counterfactual": {
+          "available": true,
+          "sweep": {
+            "angry": {
+              "label": "angry",
+              "confidence": 0.4108509421348572
+            },
+            "anxious": {
+              "label": "anxious",
+              "confidence": 0.6511358022689819
+            },
+            "calm": {
+              "label": "calm",
+              "confidence": 0.32532450556755066
+            },
+            "excited": {
+              "label": "stressed",
+              "confidence": 0.33613917231559753
+            },
+            "happy": {
+              "label": "happy",
+              "confidence": 0.3131368160247803
+            },
+            "neutral": {
+              "label": "neutral",
+              "confidence": 0.3994176685810089
+            },
+            "sad": {
+              "label": "sad",
+              "confidence": 0.5356324911117554
+            },
+            "stressed": {
+              "label": "stressed",
+              "confidence": 0.5662933588027954
+            }
+          },
+          "distinct_outcomes": [
+            "angry",
+            "anxious",
+            "calm",
+            "happy",
+            "neutral",
+            "sad",
+            "stressed"
+          ],
+          "sensitivity": 0.875,
+          "note": "The forecast changes with the assumed current emotion, so the classifier's output materially drives it."
+        },
+        "forecaster_vocabulary": {
+          "available": true,
+          "vocab_size": 528,
+          "n_tokens": 55,
+          "n_unknown": 11,
+          "unknown_rate": 0.2,
+          "unknown_tokens": [
+            "am",
+            "difficult",
+            "exams",
+            "fail",
+            "let",
+            "once",
+            "process",
+            "sad",
+            "stressed",
+            "us"
+          ]
+        }
+      }
+    }
+  ],
+  "emotion_history": [
+    {
+      "turn": 1,
+      "emotion": "sadness",
+      "confidence": 0.9671126008033752,
+      "deviation_level": "None",
+      "deviation_score": 0.0,
+      "strategy": "Comfort",
+      "forecasted_emotion": "sad",
+      "forecast_confidence": 0.6250389814376831
+    },
+    {
+      "turn": 2,
+      "emotion": "fear",
+      "confidence": 0.9795469641685486,
+      "deviation_level": "Moderate",
+      "deviation_score": 0.6,
+      "strategy": "Reassure",
+      "forecasted_emotion": "anxious",
+      "forecast_confidence": 0.6511358022689819
+    }
+  ]
 }

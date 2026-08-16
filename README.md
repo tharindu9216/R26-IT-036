@@ -35,27 +35,51 @@ The system does not only predict stress or emotion labels. It also provides expl
 ```text
 R26-IT-036/
 ├── ai_components/
-│   └── c3_text_stressor_distortion/
-│       └── Stress header/
-│           ├── dreaddit_eda.ipynb
-│           ├── dreaddit_preprocessing.ipynb
-│           ├── evaluation/
-│           │   ├── error_analysis/
-│           │   │   └── error_analysis.ipynb
-│           │   └── metrics/
-│           │       └── model_comparism.ipynb
-│           └── train/
-│               ├── augmentation.py
-│               ├── baselines.py
-│               ├── config.py
-│               ├── dataset.py
-│               ├── kfold.py
-│               ├── model.py
-│               ├── train.py
-│               ├── train_modal.py
-│               ├── trainer.py
-│               ├── tuner.py
-│               └── utils.py
+│   ├── c3_text_stressor_distortion/
+│   │   └── Stress header/
+│   │       ├── dreaddit_eda.ipynb
+│   │       ├── dreaddit_preprocessing.ipynb
+│   │       ├── evaluation/
+│   │       │   ├── error_analysis/
+│   │       │   │   └── error_analysis.ipynb
+│   │       │   └── metrics/
+│   │       │       └── model_comparism.ipynb
+│   │       └── train/
+│   │           ├── augmentation.py
+│   │           ├── baselines.py
+│   │           ├── config.py
+│   │           ├── dataset.py
+│   │           ├── kfold.py
+│   │           ├── model.py
+│   │           ├── train.py
+│   │           ├── train_modal.py
+│   │           ├── trainer.py
+│   │           ├── tuner.py
+│   │           └── utils.py
+│   └── c4_emotion_support/
+│       ├── streamlit_app.py
+│       ├── smoke_test.py
+│       ├── config.py
+│       ├── c4_pipeline/
+│       │   ├── pipeline.py
+│       │   ├── emotion_classifier.py
+│       │   ├── emotion_forecaster.py
+│       │   ├── forecast_models.py
+│       │   ├── label_mapping.py
+│       │   ├── xai.py
+│       │   ├── deviation_tracker.py
+│       │   ├── strategy_selector.py
+│       │   ├── reply_graph.py       (LangGraph reply generation)
+│       │   ├── qwen_generator.py    (Qwen3-4B + ESConv LoRA)
+│       │   ├── strategy_mapping.py
+│       │   ├── response_generator.py
+│       │   └── safety.py
+│       ├── models/
+│       ├── sample_outputs/
+│       └── training/            (superseded — see its README)
+├── streamlit_app/
+│   ├── c3_text_stressor_distortion/
+│   └── c4_emotion_support/      (launcher for the C4 demo)
 ├── backend/
 ├── data/
 │   └── Stress header/
@@ -247,15 +271,30 @@ Component C4 focuses on forecasting the user's next emotional state and generati
 
 ### Datasets
 
-* DailyDialog
-* EmpatheticDialogues
-* ESConv
+* Current emotion classifier: DailyDialog-derived sentiment set (5 labels — neutral, anger, fear, joy, sadness)
+* Next emotion forecaster: synthetic scenario-driven conversational corpus (8 labels — angry, anxious, calm, excited, happy, neutral, sad, stressed)
+* Planned: MELD, EmpatheticDialogues, ESConv for real-corpus benchmarking
 
 ### Methodology
 
 C4 follows a Forecast-then-Respond pipeline. First, the system identifies the user's current emotional state. Then it predicts the likely next-turn emotion based on the current dialogue context. After that, a support strategy is selected using the current emotion and forecasted emotion. Finally, a supportive response is generated using the selected strategy.
 
 This approach makes the dialogue system more proactive because it does not only respond to the current emotion. It also considers how the user's emotion may change in the next turn.
+
+### Implementation status
+
+Both models are trained and integrated into a runnable Streamlit demo with Explainable AI at every stage.
+
+| Model | Test accuracy | Test macro-F1 |
+| --- | --- | --- |
+| Current emotion classifier (roberta-base) | 0.8214 | 0.8162 |
+| Next emotion forecaster (TextCNN) | 0.7217 | 0.7003 |
+| Next emotion forecaster (DistilBERT) | 0.7177 | 0.7025 |
+| Persistence baseline (forecasting) | 0.7270 | 0.7098 |
+
+No trained forecaster beats the persistence baseline yet, and the demo reports this rather than hiding it. Explanations use Integrated Gradients and occlusion for token attributions, counterfactual probing of the current-emotion feature, and an explicit rule trace for strategy selection.
+
+Component code: `ai_components/c4_emotion_support/` (see its README for details). Demo launcher: `streamlit_app/c4_emotion_support/`.
 
 ### Support Strategies
 

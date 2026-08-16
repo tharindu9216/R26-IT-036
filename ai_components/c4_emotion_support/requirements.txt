@@ -1,11 +1,33 @@
+# C4 demo dependencies.
+#
+# Verified against: streamlit 1.36.0, torch 2.13.0+cu126, transformers 5.8.0,
+# plotly 6.7.0, pandas 2.3.3, numpy 2.4.4 on Python 3.12.
+#
+# The XAI layer (Integrated Gradients, occlusion, counterfactual probing) is
+# implemented on plain PyTorch, so captum / shap / lime are deliberately NOT
+# required -- they add ~400 MB and are awkward to build on Windows.
+
 streamlit==1.36.0
 starlette==0.37.2
 transformers
 torch
 numpy
 pandas
-scikit-learn
 plotly
-joblib
-peft
+
+# torch loads the .pt forecaster checkpoints; transformers needs accelerate for
+# device placement of the RoBERTa classifier.
 accelerate
+
+# ---------------------------------------------------------------- reply generation
+# Stage 6 (c4_pipeline/reply_graph.py) orchestrates Qwen3-4B with LangGraph.
+# Only langgraph itself is used -- no langchain agents, no LLM provider wrappers
+# -- because the model is called directly through transformers.
+langgraph>=0.2.0
+
+# peft attaches the ESConv LoRA adapter; bitsandbytes provides the 4-bit NF4
+# kernels that let a 4B model share a 12 GB card with the other two models.
+# Both are optional at runtime: without them the graph falls back to templates,
+# which is how the demo stays runnable on a CPU-only machine.
+peft>=0.15.0
+bitsandbytes>=0.45.0; platform_system != "Darwin"
