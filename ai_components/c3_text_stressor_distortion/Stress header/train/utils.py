@@ -1,3 +1,12 @@
+"""Utility functions for the stress classification training pipeline.
+
+This module provides helper functions for calculating evaluation metrics,
+saving result files, logging training progress, creating visualizations, and
+printing the final model comparison table.
+
+These functions support the training pipeline but do not train the models
+directly.
+"""
 
 import os, json, time
 import numpy as np
@@ -10,9 +19,7 @@ from sklearn.metrics import (
 )
 
 
-# =============================================================================
 # Metrics
-# =============================================================================
 def compute_metrics(labels, preds, probs=None):
     m = {
         'accuracy'    : accuracy_score(labels, preds),
@@ -37,9 +44,7 @@ def compute_head1b_metrics(labels, preds):
     }
 
 
-# =============================================================================
 # Save / Load
-# =============================================================================
 def save_results(data, path):
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
 
@@ -53,9 +58,7 @@ def save_results(data, path):
         json.dump(data, f, indent=2, default=_cvt)
 
 
-# =============================================================================
 # Logger
-# =============================================================================
 class Logger:
     def __init__(self, log_path=None):
         self.t0 = time.time()
@@ -78,9 +81,7 @@ class Logger:
         self.log('=' * 65)
 
 
-# =============================================================================
 # Visualizations
-# =============================================================================
 def plot_confusion_matrices(all_results, output_dir, class_names=None):
     """Save confusion matrix for each model."""
     if class_names is None:
@@ -207,9 +208,7 @@ def plot_comparison_dashboard(all_results, output_dir):
     print(f'  Saved: {path}')
 
 
-# =============================================================================
 # Final comparison table
-# =============================================================================
 def print_final_table(all_results):
     print('\n' + '=' * 100)
     print('  FINAL COMPARISON — TEST SET')
