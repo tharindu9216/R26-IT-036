@@ -1,18 +1,8 @@
-"""Text augmentation utilities for stress classification training.
-
-This module randomly replaces selected stress-related words with simple
-predefined synonyms during training. This creates small variations of the
-training text without changing the original dataset.
-
-The purpose is to help the model learn different word choices with similar
-meanings, improving generalization on unseen text.
-"""
 
 import random
 import re
 
 
-# Mapping of target words to interchangeable synonyms used for augmentation.
 SYNONYM_MAP = {
     'afraid': ['scared', 'fearful'],
     'angry': ['upset', 'frustrated'],
@@ -45,20 +35,6 @@ SYNONYM_MAP = {
 
 
 def _match_case(source, replacement):
-    """Match replacement casing to the original token.
-
-    Rules:
-    - If the source token is fully uppercase, return uppercase replacement.
-    - If the source token is title-cased, capitalize replacement.
-    - Otherwise, keep replacement lowercase as provided.
-
-    Args:
-        source (str): Original token from input text.
-        replacement (str): Candidate synonym to insert.
-
-    Returns:
-        str: Replacement token with casing aligned to source.
-    """
     if source.isupper():
         return replacement.upper()
     if source[:1].isupper():
@@ -67,24 +43,6 @@ def _match_case(source, replacement):
 
 
 def synonym_replace(text, probability=0.15, max_replacements=1):
-    """Randomly replace eligible words with synonyms.
-
-    The function tokenizes text into words, punctuation, and whitespace so the
-    original spacing/punctuation structure is preserved after augmentation.
-    Replacement is applied only with the given probability and only to words
-    present in `SYNONYM_MAP`.
-
-    Args:
-        text (str): Input sentence/document.
-        probability (float, optional): Chance to apply augmentation for the
-            given text. Defaults to 0.15.
-        max_replacements (int, optional): Maximum number of word substitutions
-            in a single text. Defaults to 1.
-
-    Returns:
-        str: Augmented text, or original text when augmentation is skipped or
-        no eligible words are found.
-    """
     if not text or random.random() > probability:
         return text
 

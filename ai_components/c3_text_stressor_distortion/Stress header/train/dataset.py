@@ -1,17 +1,4 @@
 
-"""Dataset and DataLoader utilities for transformer-based stress classification.
-
-This module converts preprocessed text data into PyTorch Dataset and DataLoader
-objects for model training, validation, and testing.
-
-Each sample is tokenized using the selected transformer tokenizer and returns
-input IDs, attention masks, the binary stress label, and the subreddit category
-label.
-
-Text augmentation is applied only to the training data when enabled in Config.
-Validation and test data are always kept unchanged.
-"""
-
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
 

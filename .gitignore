@@ -16,9 +16,6 @@ build/
 dist/
 *.egg-info/
 
-# JavaScript dependencies
-node_modules/
-
 # Virtual environments
 .venv/
 venv/
@@ -53,6 +50,3 @@ reports/
 # Training/runtime output folders
 **/local_results/
 **/training_outputs/
-
-# Backend diary database
-backend/**/*.db
