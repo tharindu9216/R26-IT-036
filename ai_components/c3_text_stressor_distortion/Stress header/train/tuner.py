@@ -1,14 +1,3 @@
-"""
-Hyperparameter tuning for transformer stress classification models.
-
-This module uses Optuna to search for the best training settings for each
-transformer model. It tests different learning rates, dropout values, loss
-weights, batch sizes, and gradient accumulation steps using short training
-trials.
-
-The best hyperparameters are returned and later used for the final K-Fold
-training process.
-"""
 
 import torch
 import optuna

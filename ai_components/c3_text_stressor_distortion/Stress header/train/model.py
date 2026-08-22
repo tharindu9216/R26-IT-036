@@ -1,12 +1,3 @@
-"""Model architecture for transformer-based stress classification.
-
-This module defines the dual-head transformer model used for stress detection.
-The shared transformer encoder extracts text features, while two classification
-heads predict the stress label and the subreddit category.
-
-It also defines a layer-wise optimizer so pretrained transformer layers are
-updated slowly and newly added classification heads learn faster.
-"""
 
 import torch
 import torch.nn as nn
@@ -14,7 +5,9 @@ from torch.optim import AdamW
 from transformers import AutoModel
 
 
+# =============================================================================
 # Two-Layer Classification Head (spec: Linear→GELU→Dropout→Linear)
+# =============================================================================
 class ClassificationHead(nn.Module):
     """
     768 → 256 → GELU → Dropout(0.1) → num_classes
@@ -33,7 +26,9 @@ class ClassificationHead(nn.Module):
         return self.fc2(self.dropout(self.act(self.fc1(x))))
 
 
+# =============================================================================
 # Dual-Head Stress Model
+# =============================================================================
 class DualHeadStressModel(nn.Module):
     """
     Shared encoder + LayerNorm + Dropout → two ClassificationHeads.
@@ -71,7 +66,9 @@ class DualHeadStressModel(nn.Module):
         return self.head_1a(cls), self.head_1b(cls)
 
 
+# =============================================================================
 # Layer-wise LR Decay Optimizer (spec: layer_lr = base_lr × 0.9^(12-i))
+# =============================================================================
 def get_layerwise_optimizer(model, base_lr, lr_decay=0.9,
                              head_lr_mult=10.0, weight_decay=0.01):
     """
@@ -80,9 +77,6 @@ def get_layerwise_optimizer(model, base_lr, lr_decay=0.9,
     Heads         → base_lr × head_lr_mult  (trained from scratch)
 
     No weight decay on: bias, LayerNorm.weight, layer_norm.weight
-
-    lower learning rates for the general language features in the pretrained transformer layers,
-    high learning rates for the task-specific features in the higher layers and classification heads.
     """
     NO_DECAY = {'bias', 'LayerNorm.weight', 'layer_norm.weight'}
     encoder  = model.encoder

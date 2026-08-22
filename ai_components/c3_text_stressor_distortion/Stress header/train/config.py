@@ -1,14 +1,4 @@
-"""
-Configuration settings for the stress classification training pipeline.
 
-This module stores all shared settings used across the project, including
-dataset paths, output paths, model names, hyperparameters, augmentation
-settings, Optuna settings, K-Fold settings, TF-IDF baseline parameters, and
-device configuration.
-
-Other training files import this Config class to keep the experiment settings
-centralized and consistent.
-"""
 import os
 from pathlib import Path
 import torch
@@ -19,7 +9,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 class Config:
 
-    # Paths (Modal overrides these via env vars) 
+    # ── Paths (Modal overrides these via env vars) ────────────────────────────
     DATA_DIR = os.getenv(
         'DATA_DIR',
         str(PROJECT_ROOT / 'data/Stress header/processed')
@@ -29,14 +19,14 @@ class Config:
         str(PROJECT_ROOT / 'models/c3_text_stressor_distortion/Stress header')
     )
 
-    #  Reproducibility 
+    # ── Reproducibility ───────────────────────────────────────────────────────
     SEED = 42
 
-    #  Models — matched exactly to preprocessing MODEL_REGISTRY 
+    # ── Models — matched exactly to preprocessing MODEL_REGISTRY ─────────────
     TRANSFORMERS = ['BERT', 'MentalBERT', 'DeBERTa-v3']
     ML_BASELINES = ['LR', 'SVM']
 
-    #  Hyperparameters 
+    # ── Hyperparameters ───────────────────────────────────────────────────────
     # Optuna will override per model — these are fallback defaults
     BASE_HYPERPARAMS = {
         'num_epochs'       : 10,
@@ -57,7 +47,7 @@ class Config:
         'MAX_LEN'          : 192,     # used if metadata.json max_len not found
     }
 
-    #  Text augmentation 
+    # ── Text augmentation ────────────────────────────────────────────────────
     # Applied only to training splits, never validation/test.
     AUGMENTATION = {
         'enabled'          : True,
@@ -65,15 +55,15 @@ class Config:
         'max_replacements' : 1,
     }
 
-    #  Optuna 
+    # ── Optuna ────────────────────────────────────────────────────────────────
     N_OPTUNA_TRIALS = 10
     OPTUNA_EPOCHS   = 2     # fast proxy — 2 epochs per trial
     # NOTE: Optuna runs separately per model inside train.py — NOT here
 
-    #  K-Fold 
+    # ── K-Fold ────────────────────────────────────────────────────────────────
     N_FOLDS = 5
 
-    #  TF-IDF + ML Baseline settings 
+    # ── TF-IDF + ML Baseline settings ────────────────────────────────────────
     TFIDF_PARAMS = {
         'max_features': 50000,
         'ngram_range' : (1, 2),
@@ -94,7 +84,7 @@ class Config:
         'class_weight': 'balanced',
     }
 
-    #  Device 
+    # ── Device ────────────────────────────────────────────────────────────────
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     @staticmethod
