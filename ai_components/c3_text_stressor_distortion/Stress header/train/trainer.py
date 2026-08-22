@@ -1,3 +1,10 @@
+"""Training and evaluation utilities for transformer stress classification.
+
+This module contains the Trainer class, which trains the dual-head transformer
+model, evaluates it on validation or test data, applies mixed precision,
+gradient accumulation, learning rate scheduling, early stopping, and saves the
+best model based on validation F1 score.
+"""
 
 import torch
 import torch.nn as nn
@@ -48,9 +55,7 @@ class Trainer:
         self.scheduler = get_cosine_schedule_with_warmup(
             self.optimizer, warmup, total)
 
-    # =========================================================================
     # Train one epoch
-    # =========================================================================
     def train_epoch(self, loader, crit_1a, crit_1b):
         """
         fp16 autocast + gradient accumulation.
@@ -106,9 +111,7 @@ class Trainer:
         return (total_loss / len(loader),
                 compute_metrics(labels_all, preds_all, probs_all))
 
-    # =========================================================================
     # Evaluate
-    # =========================================================================
     def evaluate(self, loader, crit_1a, crit_1b):
         """
         Returns metrics for Head 1A (primary) + Head 1B accuracy.
@@ -150,9 +153,7 @@ class Trainer:
             **compute_head1b_metrics(l1b, p1b),
         }
 
-    # =========================================================================
     # Full training loop with early stopping
-    # =========================================================================
     def fit(self, train_loader, val_loader, crit_1a, crit_1b, save_path):
         """
         Early stopping (patience from hp).
@@ -204,3 +205,35 @@ class Trainer:
                     break
 
         return best_f1, best_metrics, history
+
+    # Fixed-epoch refit — no validation split, no early stopping
+    def fit_fixed_epochs(self, train_loader, crit_1a, crit_1b,
+                          save_path, num_epochs):
+        """
+        Trains for exactly `num_epochs` with no early stopping.
+
+        Used for the final refit on 100% of train+val data, once K-Fold CV
+        has already validated the hyperparameters and supplied an epoch
+        budget (e.g. the average best-epoch across folds). There is no
+        validation split left to monitor at this stage, so the model is
+        simply saved after the last epoch.
+        """
+        history = {'train_loss': []}
+        self.build_scheduler(train_loader)
+
+        for epoch in range(num_epochs):
+            tr_loss, tr_m = self.train_epoch(train_loader, crit_1a, crit_1b)
+            history['train_loss'].append(tr_loss)
+
+            if self.logger:
+                self.logger.log(
+                    f'    Epoch {epoch+1}/{num_epochs} | '
+                    f'Loss: {tr_loss:.4f} | '
+                    f'Train F1: {tr_m["f1_macro"]:.4f}'
+                )
+
+        torch.save(self.model.state_dict(), save_path)
+        if self.logger:
+            self.logger.log(f'    Final refit model saved → {save_path}')
+
+        return history
