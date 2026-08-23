@@ -1,4 +1,10 @@
+"""Main training script for the stress classification pipeline.
 
+This script controls the full experiment. It loads the processed datasets and
+metadata, trains the TF-IDF baseline models, tunes transformer hyperparameters
+with Optuna, trains transformer models using K-Fold cross-validation, builds an
+ensemble, and saves the final results, logs, and visualizations.
+"""
 import os, json
 import torch
 import torch.nn as nn
@@ -9,7 +15,7 @@ from transformers import AutoTokenizer
 from config    import Config
 from baselines import run_all_baselines
 from tuner     import run_optuna
-from kfold     import train_kfold
+from kfold     import train_kfold, train_final
 from utils     import (Logger, save_results, print_final_table,
                         compute_metrics,
                         plot_confusion_matrices,
@@ -34,7 +40,7 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(Config.SEED)
 
-    # ── Load data ─────────────────────────────────────────────────────────────
+    #  Load data 
     log.section('Loading Data')
 
     with open(os.path.join(Config.DATA_DIR, 'metadata.json')) as f:
@@ -63,26 +69,21 @@ def main():
     log.log(f'W_1A      : {meta["class_weights"]["head1a"]}')
     log.log(f'W_1B      : {[round(w,3) for w in meta["class_weights"]["head1b"]]}')
 
-    # ── Loss functions (shared across all transformer models) ─────────────────
+    #  Loss functions (shared across all transformer models) 
     # CrossEntropyLoss with class weights + label smoothing
     crit_1a = nn.CrossEntropyLoss(weight=weights_1a, label_smoothing=0.1)
     crit_1b = nn.CrossEntropyLoss(weight=weights_1b, label_smoothing=0.1)
 
     all_results = {}
 
-    # =========================================================================
+
     # STEP 1 — ML Baselines
     # Trained on full_df (train+val combined), tested on test_df
-    # < 2 minutes
-    # =========================================================================
     log.section('STEP 1 — ML Baselines')
     baseline_results = run_all_baselines(full_df, test_df, logger=log)
     all_results.update(baseline_results)
 
-    # =========================================================================
     # STEP 2 — Optuna per transformer model
-    # Each transformer gets its own best params.
-    # =========================================================================
     log.section('STEP 2 — Optuna Hyperparameter Search')
 
     hyperparams_by_model = {}
@@ -123,10 +124,8 @@ def main():
         del tokenizer
         torch.cuda.empty_cache()
 
-    # =========================================================================
-    # STEPS 3-5 — Train all 3 transformer models
+    # STEPS 3— Train all 3 transformer models
     # Uses model-specific best_params from Optuna
-    # =========================================================================
     for step_num, model_name in enumerate(Config.TRANSFORMERS, start=3):
         log.section(f'STEP {step_num} — {model_name}')
 
@@ -158,17 +157,61 @@ def main():
             logger         = log,
         )
 
+        # STEP 3b — Refit on 100% of train+val (full_df)
+        # K-Fold above estimates generalization (mean_val_f1 / std_val_f1)
+        # and tells us how many epochs each fold needed to peak — it should
+        # NOT be used to hand-pick whichever single fold got the luckiest
+        # validation split. Average the folds' best epoch into one epoch
+        # budget, then retrain once on all the data for that many epochs.
+        # This refit model is the one that gets reported and deployed.
+        best_epochs      = [fr['best_epoch'] for fr in results['fold_results']]
+        final_num_epochs = max(1, round(sum(best_epochs) / len(best_epochs)))
+        log.log(f'  Fold best epochs: {best_epochs} -> '
+                f'refit epoch budget = {final_num_epochs}')
+
+        final_result = train_final(
+            model_name     = model_name,
+            hf_id          = hf_id,
+            text_col       = text_col,
+            max_len        = max_len,
+            full_df        = full_df,
+            test_df        = test_df,
+            hp             = hyperparams_by_model[model_name],
+            crit_1a        = crit_1a,
+            crit_1b        = crit_1b,
+            num_subreddits = num_subreddits,
+            tokenizer      = tokenizer,
+            num_epochs     = final_num_epochs,
+            logger         = log,
+        )
+
+        # Keep the K-Fold diagnostics (fold_results, mean/std val F1, and the
+        # best-single-fold test score for comparison) under 'best_fold_*',
+        # but the top-level test_metrics/preds/labels/probs/model_path used
+        # everywhere downstream (plots, final table, ensemble, deployment)
+        # now come from the full-data refit model, not the cherry-picked fold.
+        results['best_fold_test_metrics'] = results.pop('test_metrics')
+        results['best_fold_test_preds']   = results.pop('test_preds')
+        results['best_fold_test_labels']  = results.pop('test_labels')
+        results['best_fold_test_probs']   = results.pop('test_probs')
+        results['best_fold_model_path']   = results.pop('model_path')
+
+        results['test_metrics']      = final_result['test_metrics']
+        results['test_preds']        = final_result['test_preds']
+        results['test_labels']       = final_result['test_labels']
+        results['test_probs']        = final_result['test_probs']
+        results['model_path']        = final_result['model_path']
+        results['final_refit_epochs'] = final_result['num_epochs']
+
         all_results[model_name] = results
 
         #  Free GPU memory before next model
         del tokenizer
         torch.cuda.empty_cache()
 
-    # =========================================================================
-    # STEP 6 — Probability Ensemble
+    # STEP 4 — Probability Ensemble
     # Average BERT + DeBERTa-v3 Head 1A probabilities.
-    # =========================================================================
-    log.section('STEP 6 — BERT + DeBERTa-v3 Ensemble')
+    log.section('STEP 4 — BERT + DeBERTa-v3 Ensemble')
 
     ensemble_members = ['BERT', 'DeBERTa-v3']
     if all(m in all_results and 'test_probs' in all_results[m]
@@ -200,10 +243,9 @@ def main():
     else:
         log.log('  Skipped: missing test probabilities for BERT or DeBERTa-v3')
 
-    # =========================================================================
-    # STEP 7 — Results, Visualizations, Save
-    # =========================================================================
-    log.section('STEP 7 — Saving Results & Visualizations')
+    # STEP 5 — Results, Visualizations, Save
+    
+    log.section('STEP 5 — Saving Results & Visualizations')
 
     # Print table
     print_final_table(all_results)
@@ -227,9 +269,7 @@ def main():
     log.log(f'Saved → {Config.OUTPUT_DIR}training_curves.png')
     log.log(f'Saved → {Config.OUTPUT_DIR}comparison_dashboard.png')
 
-    # =========================================================================
     # Final summary
-    # =========================================================================
     log.section('TRAINING COMPLETE')
     medals = ['', '', '']
     ranked = sorted(all_results.items(),
@@ -255,14 +295,18 @@ FEATURES:
    Cosine LR Schedule  (with warmup)
    Mixed Precision     (fp16/bf16 auto)
    Gradient Accumulation
-   K-Fold CV           ({Config.N_FOLDS}-fold Stratified)
-   Early Stopping      (patience={Config.BASE_HYPERPARAMS['patience']})
+   K-Fold CV           ({Config.N_FOLDS}-fold Stratified, generalization estimate only)
+   Final Refit         (100% train+val, epoch budget = avg best-epoch across folds)
+   Early Stopping      (patience={Config.BASE_HYPERPARAMS['patience']}, K-Fold stage only)
    GPU memory cleared  (del model + cuda.empty_cache after each model)
 
 OUTPUT FILES:
-  {Config.OUTPUT_DIR}BERT_best.pt
-  {Config.OUTPUT_DIR}MentalBERT_best.pt
-  {Config.OUTPUT_DIR}DeBERTa-v3_best.pt
+  {Config.OUTPUT_DIR}BERT_final.pt          (deployed model — full-data refit)
+  {Config.OUTPUT_DIR}MentalBERT_final.pt    (deployed model — full-data refit)
+  {Config.OUTPUT_DIR}DeBERTa-v3_final.pt    (deployed model — full-data refit)
+  {Config.OUTPUT_DIR}BERT_best.pt           (diagnostic — best single K-Fold fold)
+  {Config.OUTPUT_DIR}MentalBERT_best.pt     (diagnostic — best single K-Fold fold)
+  {Config.OUTPUT_DIR}DeBERTa-v3_best.pt     (diagnostic — best single K-Fold fold)
   {Config.OUTPUT_DIR}all_results.json
   {Config.OUTPUT_DIR}comparison_dashboard.png
   {Config.OUTPUT_DIR}confusion_matrices.png

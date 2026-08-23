@@ -57,6 +57,10 @@ R26-IT-036/
 │               ├── tuner.py
 │               └── utils.py
 ├── backend/
+│   └── c3_text_stressor_distortion/
+│       ├── app/
+│       ├── README.md
+│       └── requirements.txt
 ├── data/
 │   └── Stress header/
 │       ├── README.md
@@ -66,6 +70,7 @@ R26-IT-036/
 ├── docs/
 │   ├── proposal/
 │   └── research_notes/
+│       └── C3_Mathematical_Equations.md
 ├── frontend/
 ├── models/
 │   └── c3_text_stressor_distortion/
@@ -212,7 +217,12 @@ The text is preprocessed and passed into transformer-based models such as RoBERT
 
 The stressor detection head identifies external causes of stress, such as academic pressure, financial problems, relationship issues, or workplace difficulties. The cognitive distortion detection head identifies internal thinking patterns such as catastrophizing, overgeneralization, personalization, and negative filtering.
 
-To improve interpretability, SHAP and LIME are used to highlight important words or phrases that influenced the prediction. BERTopic is also used to discover emerging stress-related themes beyond predefined categories.
+To improve interpretability, the Stress Header provides Integrated Gradients,
+standalone SHAP and LIME explanations, a combined SHAP + LIME + Integrated
+Gradients consensus, and model-guided counterfactual explanations.
+Counterfactual outputs describe model sensitivity rather than clinical causality
+or advice. BERTopic is also used to discover emerging stress-related themes
+beyond predefined categories.
 
 ### Expected Output
 
