@@ -7,8 +7,15 @@
 # implemented on plain PyTorch, so captum / shap / lime are deliberately NOT
 # required -- they add ~400 MB and are awkward to build on Windows.
 
-streamlit==1.36.0
-starlette==0.37.2
+# streamlit >= 1.41 for st.audio_input (push-to-talk) and >= 1.37 for
+# st.audio(autoplay=). The app degrades to text-only on an older install
+# rather than failing, but voice needs this floor.
+streamlit>=1.42
+
+# No starlette pin. It used to be held at 0.37.2 to satisfy an ambient fastapi
+# install, but streamlit itself depends on starlette from 1.4x onward and pins
+# a far newer floor, so the two constraints cannot both hold. Nothing in this
+# project imports fastapi; upgrade fastapi if pip reports the conflict.
 transformers
 torch
 numpy
@@ -31,3 +38,25 @@ langgraph>=0.2.0
 # which is how the demo stays runnable on a CPU-only machine.
 peft>=0.15.0
 bitsandbytes>=0.45.0; platform_system != "Darwin"
+
+# ---------------------------------------------------------------------- voice
+# Speech in and out, both CPU-only. The measured VRAM table in README.md leaves
+# ~0.8 GB of margin on a 4 GB card in low-VRAM mode, and none of it is spent
+# here -- Whisper and Kokoro would take that margin from the 4B reply model,
+# which is the one component the demo cannot shrink.
+#
+# Both are optional at runtime: c4_pipeline/voice.py reports a missing backend
+# in the sidebar and the text demo carries on unchanged.
+
+# faster-whisper over whisper.cpp: the same speed on this class of CPU, but it
+# decodes from an in-memory buffer instead of a temp WAV, which matters when the
+# recording is someone describing their distress. Pulls ctranslate2 and av.
+faster-whisper>=1.0.0
+
+# Kokoro-82M ONNX. 0.4.9 is the floor because that line bundles its phonemiser
+# (espeakng-loader / misaki) instead of needing a system espeak-ng install,
+# which is the usual way neural TTS fails on a fresh Windows machine.
+# If it fails anyway, voice.py falls back to Windows SAPI via System.Speech,
+# which needs no package at all.
+kokoro-onnx>=0.4.9
+onnxruntime

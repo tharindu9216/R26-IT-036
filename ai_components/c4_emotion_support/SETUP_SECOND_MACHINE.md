@@ -128,6 +128,32 @@ setx C4_LOW_VRAM 1
 
 ---
 
+## 3b. Voice mode (optional)
+
+Skip this if the demo is text-only. Otherwise fetch the two speech models — they
+go into `models/` with everything else, so an offline machine stays offline:
+
+```powershell
+python vendor_models.py --voice
+```
+
+That is ~310 MB: faster-whisper `base.en` (141 MB) and Kokoro-82M fp16 with its
+voice pack (~200 MB). Neither touches the GPU, so nothing in section 3 changes —
+the VRAM figures are the same with voice mode on as off.
+
+Turn it on for the session:
+
+```powershell
+$env:C4_VOICE = "1"
+```
+
+If Kokoro will not load on this machine — the usual cause is its phonemiser, not
+the model — the app falls back to Windows SAPI automatically and says so in the
+sidebar. That is a supported configuration: it sounds worse and needs no
+download at all.
+
+---
+
 ## 4. Verify before demoing
 
 ```powershell
@@ -160,6 +186,18 @@ nvidia-smi --query-gpu=memory.used,memory.total --format=csv -l 2
 
 Expect a peak in the region of 3.0–3.2 GB.
 
+If you set up voice mode, round-trip it too — it synthesises a line, transcribes
+it back, and asserts the sentence survives:
+
+```powershell
+python smoke_test.py --voice
+```
+
+Both speech backends can fail independently and neither failure is loud (the app
+degrades in the sidebar rather than raising), so this is the only check that
+proves speech actually works rather than merely imports. It reports the measured
+real-time factor; on the reference laptop it is around 0.35.
+
 ---
 
 ## 5. Run
@@ -169,7 +207,8 @@ streamlit run streamlit_app.py
 ```
 
 The sidebar states which configuration is live: classifier device, forecaster
-checkpoint, whether the adapter loaded, and a low-VRAM notice. If a demo is
+checkpoint, whether the adapter loaded, a low-VRAM notice, and — with voice mode
+on — which speech backends are in use. If a demo is
 running on templates or without the adapter, the sidebar says so — check it
 before presenting.
 

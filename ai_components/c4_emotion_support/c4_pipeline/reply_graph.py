@@ -144,6 +144,9 @@ class ReplyState(TypedDict, total=False):
     deviation_score: float
     strategy: str
     safety: Dict[str, Any]
+    # Per-turn reply budget. None means LLM_MAX_NEW_TOKENS; voice mode passes a
+    # smaller number because generation dominates a spoken turn's latency.
+    max_new_tokens: Optional[int]
 
     # --- routing / planning -------------------------------------------------
     route: str
@@ -338,7 +341,7 @@ def generate_reply(state: ReplyState) -> Dict[str, Any]:
         result = generator.generate(
             messages=state.get("prompt_messages") or [],
             use_adapter=use_adapter,
-            max_new_tokens=LLM_MAX_NEW_TOKENS,
+            max_new_tokens=state.get("max_new_tokens") or LLM_MAX_NEW_TOKENS,
             temperature=temperature,
         )
     except Exception as error:  # noqa: BLE001 - a bad turn must not kill the chat
@@ -586,6 +589,7 @@ def generate_supportive_reply(
     strategy: str,
     safety: Dict[str, Any],
     dialogue_history: Optional[Sequence[Tuple[str, str]]] = None,
+    max_new_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Run one turn through the graph and return its final state."""
     initial: ReplyState = {
@@ -600,6 +604,7 @@ def generate_supportive_reply(
         "deviation_score": deviation_score,
         "strategy": strategy,
         "safety": safety,
+        "max_new_tokens": max_new_tokens,
         "node_trace": [],
     }
     # recursion_limit caps the retry cycle: each attempt costs ~4 super-steps.

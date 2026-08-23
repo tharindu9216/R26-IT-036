@@ -186,6 +186,98 @@ IG_STEPS = 64
 IG_MAX_RELATIVE_GAP = 0.15
 XAI_TOP_K = 10
 
+# ----------------------------------------------------------------- voice
+# Speech in and out, both pinned to the CPU.
+#
+# The VRAM table above is measured to ~0.1 GB and low-VRAM mode leaves roughly
+# 0.8 GB of margin on a 4 GB card. Spending any of that on speech would make the
+# 4B reply model -- the component the demo exists to show -- the thing that stops
+# fitting. Whisper and Kokoro are small enough that their CPU latency (well under
+# a second each) is a fraction of one Qwen turn, so the GPU never has to pay.
+VOICE_ENABLED = os.environ.get("C4_VOICE", "").strip().lower() in ("1", "true", "yes", "on")
+
+# ---- speech to text (faster-whisper) ----
+# "base.en" over the smaller checkpoints for a reason that is specific to this
+# pipeline rather than general: Whisper emits casing and punctuation, which keeps
+# transcripts inside the distribution the RoBERTa classifier and the TextCNN
+# forecaster were trained on. Lowercase, unpunctuated ASR output (Vosk and
+# friends) is a measurable shift in the input those two models see. Drop to
+# "tiny.en" (~75 MB) only if transcription latency becomes the bottleneck.
+STT_MODEL = os.environ.get("C4_STT_MODEL", "base.en")
+STT_DEVICE = "cpu"
+STT_COMPUTE_TYPE = "int8"
+# Greedy rather than faster-whisper's default beam of 5. Turns here are one or
+# two sentences of ordinary speech, where the beam rarely changes the transcript,
+# and greedy roughly halves the decode.
+STT_BEAM_SIZE = 1
+STT_LANGUAGE = "en"
+
+# Whisper reports a mean token log-probability per segment. Clean speech sits
+# around -0.5 or better; this threshold is where transcripts start being wrong
+# often enough to be worth flagging in the UI. It never blocks a turn -- see
+# `VOICE_AUTO_SUBMIT` -- it only annotates one.
+STT_LOW_CONFIDENCE_LOGPROB = -0.8
+
+# ---- text to speech (Kokoro-82M ONNX, with a Windows SAPI fallback) ----
+# Kokoro is ~6x slower than Piper per second of audio, which does not matter
+# here: LLM_MAX_REPLY_SENTENCES caps a reply at four sentences and the ESConv
+# median is ~20 words, so a turn is a couple of seconds of synthesis against a
+# reply that took Qwen far longer to write. What it buys is a voice that sounds
+# supportive rather than synthetic, which is not merely cosmetic for this system.
+KOKORO_DIR = MODELS_DIR / "kokoro"
+# Release assets ship fp32, fp16 and int8 builds under different names, so this
+# is a preference order rather than a requirement -- the loader takes whichever
+# build is on disk.
+#
+# Measured on the target laptop CPU (4 cores / 8 threads), best of three runs,
+# synthesising the same 6.8 s reply:
+#
+#     build   threads   time     RTF
+#     int8    default   9.89 s   1.45
+#     fp32    4         2.47 s   0.36
+#     fp16    4         2.34 s   0.34
+#
+# int8 is the trap here. It is the smallest download and the obvious default,
+# and it is roughly 4x SLOWER than fp16: ONNX int8 on this CPU spends more in
+# quantise/dequantise than the narrower weights save. fp16 leads on both speed
+# and quality at ~160 MB, so it is the default and int8 is ranked last.
+KOKORO_MODEL_PREFERENCE = ["fp16", "", "int8"]
+KOKORO_VOICES_FILE = "voices-v1.0.bin"
+
+# onnxruntime defaults to one thread per logical core. On a hyperthreaded 4-core
+# laptop that is a measurable loss -- the same reply took 4.29 s at 8 threads
+# against 2.47 s at 4 -- because the HT siblings contend rather than help.
+# Physical cores, near enough, and capped so a big desktop does not oversubscribe.
+KOKORO_INTRA_OP_THREADS = max(1, min(6, (os.cpu_count() or 4) // 2))
+
+# af_heart is Kokoro's highest-rated voice. 0.95 speaks a little under natural
+# pace, which reads as unhurried rather than slow and suits the register the
+# ESConv adapter was trained to write in.
+TTS_VOICE = os.environ.get("C4_TTS_VOICE", "af_heart")
+TTS_SPEED = 0.95
+TTS_LANGUAGE = "en-us"
+# Kokoro degrades on very long inputs, so the synthesiser splits past this and
+# concatenates. Four ESConv-length sentences sit well under it; the fixed crisis
+# text is the turn that can approach it.
+TTS_MAX_CHARS_PER_CHUNK = 400
+TTS_SAMPLE_WIDTH = 2  # 16-bit PCM
+
+# ---- interaction ----
+# Push-to-talk with no confirmation step: the recording is transcribed and sent
+# in one gesture. The cost is that an ASR error reaches the pipeline unreviewed,
+# including safety.py's crisis regex, where a mis-transcription is a missed
+# detection. That is mitigated rather than prevented -- the transcript is shown
+# in the user's own bubble, low-confidence turns are captioned, and the last turn
+# can be undone -- because a confirm-and-send step removes the point of talking.
+VOICE_AUTO_SUBMIT = True
+VOICE_AUTOPLAY = True
+
+# Reply budget while voice mode is on. Generation is 60-80% of a spoken turn's
+# latency on a 4 GB laptop card, so this is the largest responsiveness lever the
+# demo has -- and it cuts in the right direction anyway, since a reply that is
+# listened to wants to be shorter than one that is read.
+LLM_VOICE_MAX_NEW_TOKENS = 64
+
 # ----------------------------------------------------------------- reported metrics
 # Test-set numbers from the training runs, surfaced in the UI so the demo cannot
 # silently drift from what was actually measured.

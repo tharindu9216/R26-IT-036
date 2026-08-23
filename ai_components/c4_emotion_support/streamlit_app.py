@@ -6,8 +6,9 @@ stage, both the output and the explanation behind it.
     streamlit run streamlit_app.py
 """
 
+import hashlib
 import html
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -19,6 +20,11 @@ from c4_pipeline.emotion_forecaster import EmotionForecaster
 from c4_pipeline.qwen_generator import QwenReplyGenerator
 from c4_pipeline.reply_graph import set_generator
 from c4_pipeline.strategy_mapping import mapping_table
+from c4_pipeline.voice import (
+    SpeechSynthesizer,
+    SpeechTranscriber,
+    Transcript,
+)
 from config import (
     AVAILABLE_FORECASTERS,
     CLASSIFIER_METRICS,
@@ -29,12 +35,21 @@ from config import (
     FORECASTER_METRICS,
     LLM_ADAPTER_PATH,
     LLM_BASE_MODEL,
+    LLM_VOICE_MAX_NEW_TOKENS,
     LOW_VRAM,
     NEXT_EMOTION_MODEL_PATH,
     SMALL_MODEL_DEVICE,
+    STT_MODEL,
+    VOICE_AUTOPLAY,
+    VOICE_ENABLED,
 )
 
 st.set_page_config(page_title="C4 Emotion Forecasting Demo", page_icon="💬", layout="wide")
+
+# Push-to-talk needs st.audio_input (Streamlit >= 1.41) and autoplay needs
+# st.audio(autoplay=) (>= 1.37). requirements.txt asks for >= 1.42; an older
+# install keeps the text demo rather than dying on a missing attribute.
+HAS_AUDIO_INPUT = hasattr(st, "audio_input")
 
 # Palette: single-hue sequential for magnitude, blue<->red diverging for signed
 # attributions, gray for the neutral midpoint.
@@ -64,6 +79,15 @@ def _init_state() -> None:
     st.session_state.setdefault("messages", [])
     st.session_state.setdefault("emotion_history", [])
     st.session_state.setdefault("pipeline_traces", [])
+    # Index of the last assistant message that has already been spoken. Streamlit
+    # re-runs the whole script on every interaction, so without this the newest
+    # reply would autoplay again each time a sidebar toggle moved.
+    st.session_state.setdefault("spoken_upto", -1)
+    # Bumped after each processed recording. It is the st.audio_input widget key,
+    # and changing the key is what clears the widget -- otherwise it keeps
+    # returning the same clip on every rerun and the turn fires repeatedly.
+    st.session_state.setdefault("voice_turn", 0)
+    st.session_state.setdefault("last_audio_digest", "")
 
 
 @st.cache_resource(show_spinner="Loading current-emotion classifier…")
@@ -94,6 +118,17 @@ def _load_generator() -> QwenReplyGenerator:
     generator = QwenReplyGenerator()
     generator.load()
     return generator
+
+
+@st.cache_resource(show_spinner="Loading speech recognition (first run downloads ~150 MB)…")
+def _load_transcriber() -> SpeechTranscriber:
+    """CPU-only, so the 4 GB VRAM budget measured in config.py is untouched."""
+    return SpeechTranscriber().load()
+
+
+@st.cache_resource(show_spinner="Loading speech synthesis…")
+def _load_synthesizer() -> SpeechSynthesizer:
+    return SpeechSynthesizer().load()
 
 
 # ----------------------------------------------------------------- chart helpers
@@ -263,6 +298,29 @@ with st.sidebar:
                          help="Integrated Gradients costs ~32 forward passes per model.")
     show_trace = st.toggle("Show JSON trace", value=False)
 
+    voice_mode = st.toggle(
+        "Voice mode (push to talk)",
+        value=VOICE_ENABLED and HAS_AUDIO_INPUT,
+        disabled=not HAS_AUDIO_INPUT,
+        help="Speak a turn and hear the reply. Both models run on the CPU, so "
+             "this costs no VRAM.",
+    )
+    if not HAS_AUDIO_INPUT:
+        st.caption(
+            f"Voice needs Streamlit >= 1.41 for st.audio_input; this is "
+            f"{st.__version__}. Run `pip install -U -r requirements.txt`."
+        )
+
+    # XAI is what makes a spoken exchange stop feeling like a conversation:
+    # IG_STEPS is 64 forward+backward passes across two models, on top of a
+    # reply that already takes seconds to generate. Voice mode suppresses it
+    # rather than disabling the toggle, so switching voice off restores whatever
+    # the user had chosen.
+    explain = show_xai and not voice_mode
+    if show_xai and voice_mode:
+        st.caption("Explanations are paused while voice mode is on — they cost "
+                   "~64 passes per model and would stall the conversation.")
+
     if st.button("Clear conversation", use_container_width=True):
         st.session_state.messages = []
         st.session_state.emotion_history = []
@@ -277,6 +335,10 @@ with st.sidebar:
     # handles the toggle rather than the caller branching around it.
     generator = _load_generator() if use_llm else None
     set_generator(generator)
+
+    # Loaded lazily: a text-only run should not pay for ~150 MB of Whisper.
+    transcriber = _load_transcriber() if voice_mode else None
+    synthesizer = _load_synthesizer() if voice_mode else None
 
     st.subheader("Model status")
     if classifier.fallback:
@@ -330,6 +392,34 @@ with st.sidebar:
         st.error("Qwen3-4B did not load; the graph is using templates.")
         st.caption(str(generator.load_error))
 
+    if voice_mode:
+        if transcriber is not None and transcriber.available:
+            st.success(f"Speech in: faster-whisper {STT_MODEL} on cpu")
+            st.caption("int8 · transcripts are decoded in memory and never "
+                       "written to disk.")
+        else:
+            st.error("Speech recognition did not load; voice input is off.")
+            st.caption(str(transcriber.load_error if transcriber else "not loaded"))
+
+        if synthesizer is not None and synthesizer.available:
+            if synthesizer.degraded:
+                # Reached when Kokoro's phonemiser will not load, which is the
+                # usual way neural TTS fails on a fresh Windows machine.
+                st.warning(f"Speech out: {synthesizer.describe()}")
+                st.caption(f"Kokoro unavailable — {synthesizer.load_error}")
+            else:
+                st.success(f"Speech out: {synthesizer.describe()}")
+        else:
+            st.error("Speech synthesis did not load; replies stay text-only.")
+            st.caption(str(
+                (synthesizer.fallback_error or synthesizer.load_error)
+                if synthesizer else "not loaded"
+            ))
+        st.caption(
+            f"Reply budget trimmed to {LLM_VOICE_MAX_NEW_TOKENS} tokens while "
+            "speaking — generation is most of a spoken turn's latency."
+        )
+
     if LOW_VRAM:
         st.caption(
             f"Low-VRAM mode: classifier and forecaster on {SMALL_MODEL_DEVICE}, "
@@ -348,28 +438,144 @@ st.caption(
     "replacement for professional support."
 )
 
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+# ----------------------------------------------------------------- conversation
+def _undo_last_turn() -> None:
+    """Drop the most recent exchange and everything derived from it.
 
-user_input = st.chat_input("Share how you are feeling…")
-if user_input:
+    Voice turns are submitted without a confirmation step, so this is the repair
+    path for a transcription that came out wrong: the turn is removed from the
+    dialogue history before it can bias the forecaster's context or the emotion
+    chart.
+    """
+    if st.session_state.messages and st.session_state.messages[-1]["role"] == "assistant":
+        st.session_state.messages.pop()
+    if st.session_state.messages and st.session_state.messages[-1]["role"] == "user":
+        st.session_state.messages.pop()
+    if st.session_state.pipeline_traces:
+        st.session_state.pipeline_traces.pop()
+    if st.session_state.emotion_history:
+        st.session_state.emotion_history.pop()
+    st.session_state.spoken_upto = len(st.session_state.messages) - 1
+
+
+def _run_turn(text: str, transcript: Optional[Transcript] = None) -> None:
+    """One C4 turn, from either input modality.
+
+    Text and speech converge here: by this point a spoken turn is just a string,
+    which is what keeps `run_c4_pipeline` modality-agnostic. `transcript` only
+    carries the metadata worth recording about how that string was obtained.
+    """
+    voice_input = None
+    caption = None
+    if transcript is not None:
+        voice_input = {
+            "stt_backend": transcript.backend,
+            "stt_model": STT_MODEL,
+            "avg_logprob": round(transcript.avg_logprob, 3),
+            "duration_seconds": round(transcript.duration, 2),
+            "low_confidence": transcript.low_confidence,
+        }
+        if transcript.low_confidence:
+            caption = (
+                "⚠️ Low-confidence transcription — if this is not what you said, "
+                "undo the turn and try again."
+            )
+
     with st.spinner("Running the C4 pipeline…"):
         # Run before appending so the forecaster's dialogue context contains only
         # the turns that genuinely preceded this message.
         trace = run_c4_pipeline(
-            user_message=user_input,
+            user_message=text,
             conversation_state=st.session_state,
             classifier=classifier,
             forecaster=forecaster,
             force_fallback_forecaster=force_fallback_forecaster,
-            explain=show_xai,
+            explain=explain,
             use_llm=use_llm,
+            max_new_tokens=LLM_VOICE_MAX_NEW_TOKENS if voice_mode else None,
+            voice_input=voice_input,
         )
-    st.session_state.messages.append({"role": "user", "content": user_input})
-    st.session_state.messages.append(
-        {"role": "assistant", "content": trace["supportive_response"]}
-    )
+
+    reply = trace["supportive_response"]
+    spoken = b""
+    if voice_mode and synthesizer is not None and synthesizer.available:
+        with st.spinner("Speaking…"):
+            spoken = synthesizer.synthesize(reply)
+
+    user_message = {"role": "user", "content": text}
+    if caption:
+        user_message["caption"] = caption
+    st.session_state.messages.append(user_message)
+
+    assistant_message = {"role": "assistant", "content": reply}
+    if spoken:
+        assistant_message["audio"] = spoken
+    st.session_state.messages.append(assistant_message)
+
+
+for index, message in enumerate(st.session_state.messages):
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+        if message.get("caption"):
+            st.caption(message["caption"])
+        if message.get("audio"):
+            # Autoplay the newest reply only, then mark it spoken. Every rerun
+            # re-creates this element, so an unguarded autoplay would replay the
+            # last reply on every widget interaction.
+            first_play = index > st.session_state.spoken_upto
+            st.audio(
+                message["audio"],
+                format="audio/wav",
+                autoplay=first_play and VOICE_AUTOPLAY,
+            )
+            if first_play:
+                st.session_state.spoken_upto = index
+
+if voice_mode and HAS_AUDIO_INPUT:
+    mic_column, undo_column = st.columns([4, 1], vertical_alignment="bottom")
+    with mic_column:
+        # The widget key carries the turn counter: bumping it after a processed
+        # recording is what resets the widget, which is the only reliable way to
+        # stop st.audio_input handing back the same clip on the next rerun.
+        recording = st.audio_input(
+            "Push to talk — record, stop, and the turn is sent",
+            key=f"mic_{st.session_state.voice_turn}",
+        )
+    with undo_column:
+        if st.button(
+            "Undo turn",
+            use_container_width=True,
+            disabled=not st.session_state.messages,
+            help="Remove the last exchange — use it when a transcription came "
+                 "out wrong.",
+        ):
+            _undo_last_turn()
+            st.rerun()
+
+    if recording is not None:
+        audio_bytes = recording.getvalue()
+        # Second guard, belt to the widget key's braces: identical bytes are the
+        # same recording, however the widget was re-rendered.
+        digest = hashlib.sha1(audio_bytes).hexdigest()
+        if digest != st.session_state.last_audio_digest:
+            st.session_state.last_audio_digest = digest
+            if transcriber is None or not transcriber.available:
+                st.error("Speech recognition is unavailable — type instead.")
+            else:
+                with st.spinner("Transcribing…"):
+                    transcript = transcriber.transcribe(audio_bytes)
+                if transcript.error:
+                    st.error(f"Could not transcribe that clip: {transcript.error}")
+                elif not transcript.ok:
+                    st.warning("Nothing was heard in that recording — try again.")
+                else:
+                    _run_turn(transcript.text, transcript)
+                    st.session_state.voice_turn += 1
+                    st.rerun()
+
+user_input = st.chat_input("Share how you are feeling…")
+if user_input:
+    _run_turn(user_input)
     st.rerun()
 
 if not st.session_state.pipeline_traces:
@@ -552,8 +758,15 @@ with tab_reply:
 
 # ----------------------------------------------------------------- XAI
 with tab_xai:
-    if not show_xai:
-        st.info("Explanations are switched off. Enable “Compute explanations (XAI)” in the sidebar.")
+    if not explain:
+        if show_xai and voice_mode:
+            st.info(
+                "Explanations are paused while voice mode is on — Integrated "
+                "Gradients costs ~64 passes per model, which would stall a spoken "
+                "exchange. Switch voice mode off to compute them."
+            )
+        else:
+            st.info("Explanations are switched off. Enable “Compute explanations (XAI)” in the sidebar.")
     else:
         st.markdown("### 1 · Why this current emotion?")
         classifier_xai = explanations.get("classifier", {})

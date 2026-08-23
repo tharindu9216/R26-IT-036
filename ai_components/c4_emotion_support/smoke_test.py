@@ -11,9 +11,13 @@ non-zero on failure, so it is usable as a pre-demo sanity check.
 """
 
 import argparse
+import io
 import json
+import re
 import sys
+import time
 import traceback
+import wave
 
 from c4_pipeline import run_c4_pipeline
 from c4_pipeline.emotion_classifier import EmotionClassifier
@@ -25,6 +29,8 @@ from config import (
     LOW_VRAM,
     NEXT_EMOTION_MODEL_PATH,
     SMALL_MODEL_DEVICE,
+    TTS_MAX_CHARS_PER_CHUNK,
+    TTS_SAMPLE_WIDTH,
 )
 
 CONVERSATION = [
@@ -334,6 +340,84 @@ def run_guard_cases() -> None:
         )
 
 
+def run_voice_cases() -> None:
+    """Round-trip the voice stack: synthesise a line, then transcribe it back.
+
+    This is the check worth having on a second machine. Both backends can fail
+    independently and neither failure is loud -- the app degrades in the sidebar
+    rather than raising -- so an end-to-end round trip is the only thing that
+    proves speech actually works rather than merely importing.
+    """
+    from c4_pipeline.voice import (
+        TTS_KOKORO,
+        SpeechSynthesizer,
+        SpeechTranscriber,
+        _split_for_synthesis,
+    )
+
+    print("\n=== voice " + "=" * 64)
+
+    # Chunking first: it is pure logic, so it runs even where no model loaded.
+    long_text = "This is a sentence that runs on for a while. " * 20
+    chunks = _split_for_synthesis(long_text)
+    check(bool(chunks), "long text splits into chunks")
+    check(
+        all(len(chunk) <= TTS_MAX_CHARS_PER_CHUNK for chunk in chunks),
+        f"every chunk within {TTS_MAX_CHARS_PER_CHUNK} chars",
+    )
+    check(_split_for_synthesis("") == [], "empty text yields no chunks")
+
+    synthesizer = SpeechSynthesizer().load()
+    print(f"  speech out: {synthesizer.describe()}")
+    if not synthesizer.available:
+        print(f"  SKIPPED — no speech backend ({synthesizer.load_error})")
+        return
+    if synthesizer.backend != TTS_KOKORO:
+        # Not a failure: the SAPI fallback is a supported configuration. It is
+        # worth saying out loud, because it is easy to miss in the sidebar.
+        print(f"  NOTE — Kokoro unavailable, using the fallback: {synthesizer.load_error}")
+
+    spoken = "I have been feeling really overwhelmed at work and I cannot sleep."
+    start = time.time()
+    wav = synthesizer.synthesize(spoken)
+    synth_seconds = time.time() - start
+    check(bool(wav), "synthesiser produced audio")
+    if not wav:
+        return
+    with wave.open(io.BytesIO(wav)) as handle:
+        audio_seconds = handle.getnframes() / handle.getframerate()
+        check(handle.getnchannels() == 1, "audio is mono")
+        check(handle.getsampwidth() == TTS_SAMPLE_WIDTH, "audio is 16-bit PCM")
+    check(audio_seconds > 1.0, f"audio is {audio_seconds:.1f}s long")
+    print(f"  synthesised {audio_seconds:.1f}s in {synth_seconds:.1f}s "
+          f"(RTF {synth_seconds / audio_seconds:.2f})")
+
+    transcriber = SpeechTranscriber().load()
+    if not transcriber.available:
+        print(f"  SKIPPED transcription — {transcriber.load_error}")
+        return
+    start = time.time()
+    transcript = transcriber.transcribe(wav)
+    print(f"  said : {spoken}")
+    print(f"  heard: {transcript.text}")
+    print(f"  {time.time() - start:.1f}s | avg_logprob {transcript.avg_logprob:.3f}")
+    check(transcript.ok, "transcription returned text")
+
+    # Word overlap rather than exact match: Whisper repunctuates, and the point
+    # of the check is that the pipeline receives the same sentence, not the same
+    # string. A backend that is silently mis-wired scores near zero here.
+    def words(text):
+        return set(re.findall(r"[a-z]+", text.lower()))
+
+    said, heard = words(spoken), words(transcript.text)
+    overlap = len(said & heard) / max(len(said), 1)
+    check(overlap >= 0.8, f"round-trip word overlap {overlap:.0%} >= 80%")
+    check(not transcript.low_confidence, "clean speech is not flagged low-confidence")
+
+    # An empty buffer is what a mis-fired widget sends; it must not raise.
+    check(not transcriber.transcribe(b"").ok, "empty audio returns a failed transcript")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--all", action="store_true", help="include the distilbert checkpoint")
@@ -342,6 +426,11 @@ def main() -> int:
         action="store_true",
         help="load Qwen3-4B and generate for real (needs a CUDA GPU and ~8 GB of downloads)",
     )
+    parser.add_argument(
+        "--voice",
+        action="store_true",
+        help="round-trip the speech stack (needs the models from vendor_models.py --voice)",
+    )
     args = parser.parse_args()
 
     if LOW_VRAM:
@@ -349,6 +438,12 @@ def main() -> int:
 
     run_safety_cases()
     run_guard_cases()
+    if args.voice:
+        try:
+            run_voice_cases()
+        except Exception:
+            traceback.print_exc()
+            failures.append("voice round trip raised an exception")
     try:
         run_reply_graph_cases(with_llm=args.llm)
     except Exception:

@@ -13,6 +13,7 @@ with `models/` populated needs no Hugging Face download and no network at all.
 
     python vendor_models.py                  # Qwen3-4B + DistilBERT
     python vendor_models.py --skip-distilbert
+    python vendor_models.py --voice          # + Whisper and Kokoro for voice mode
     python vendor_models.py --list           # show what is vendored already
 
 Run it from this directory, after the models are in your Hugging Face cache
@@ -23,15 +24,50 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import urllib.request
 from pathlib import Path
 
-from config import DISTILBERT_BASE, LLM_BASE_MODEL, MODELS_DIR
+from config import (
+    DISTILBERT_BASE,
+    KOKORO_DIR,
+    KOKORO_VOICES_FILE,
+    LLM_BASE_MODEL,
+    MODELS_DIR,
+    STT_MODEL,
+)
 
 # (hub repo id, destination folder under models/, why it is needed)
 TARGETS = [
     (LLM_BASE_MODEL, "qwen3-4b-instruct", "reply generation (required)"),
     (DISTILBERT_BASE, "distilbert-base-uncased", "distilbert forecaster (optional)"),
 ]
+
+# Voice mode's two models, neither of which lives where the others do.
+#
+# Whisper is a normal Hugging Face repo, so it goes through the same snapshot
+# copy as everything else -- but into models/faster-whisper/<size>, which is the
+# download_root c4_pipeline/voice.py hands to WhisperModel.
+#
+# Kokoro is not on the hub at all; its ONNX builds are GitHub release assets and
+# are fetched by URL.
+#
+# fp16 rather than the smaller int8: int8 measured ~4x SLOWER on the target
+# laptop CPU (RTF 1.45 against 0.34), because ONNX int8 spends more in
+# quantise/dequantise than it saves. See KOKORO_MODEL_PREFERENCE in config.py
+# for the full measurement.
+KOKORO_RELEASE = (
+    "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
+)
+KOKORO_FILES = [
+    ("kokoro-v1.0.fp16.onnx", "Kokoro-82M, fp16 (~160 MB)"),
+    (KOKORO_VOICES_FILE, "Kokoro voice pack (~26 MB)"),
+]
+
+
+def _whisper_repo(model_size: str) -> str:
+    """faster-whisper checkpoints are published under the Systran namespace."""
+    return f"Systran/faster-whisper-{model_size}"
+
 
 # Weights, tokenizer and config only. The repo's README, LICENSE and
 # .gitattributes are not needed to load a model.
@@ -45,6 +81,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--skip-distilbert", action="store_true",
                         help="skip the 130 MB forecaster base model")
+    parser.add_argument("--voice", action="store_true",
+                        help="also vendor the Whisper and Kokoro voice models")
     parser.add_argument("--list", action="store_true",
                         help="report what is already vendored, copy nothing")
     parser.add_argument("--force", action="store_true",
@@ -95,6 +133,77 @@ def vendor(repo_id: str, folder: str, note: str, force: bool) -> bool:
     return True
 
 
+def download(url: str, destination: Path, note: str, force: bool) -> bool:
+    """Fetch one release asset, unless it is already on disk."""
+    if destination.exists() and not force:
+        size = destination.stat().st_size / (1024 ** 2)
+        print(f"  {destination.name:<26} already present ({size:,.0f} MB) - skipping")
+        return True
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    print(f"  {destination.name:<26} downloading ...", flush=True)
+    # Download to a .part file first, so an interrupted transfer cannot leave a
+    # truncated model that later fails to load with a confusing ONNX error.
+    partial = destination.with_suffix(destination.suffix + ".part")
+    try:
+        urllib.request.urlretrieve(url, partial)
+        partial.replace(destination)
+    except Exception as error:  # noqa: BLE001
+        partial.unlink(missing_ok=True)
+        print(f"  {destination.name:<26} FAILED - {type(error).__name__}: {error}")
+        return False
+
+    size = destination.stat().st_size / (1024 ** 2)
+    print(f"  {destination.name:<26} done ({size:,.0f} MB) - {note}")
+    return True
+
+
+def fetch_whisper(force: bool) -> bool:
+    """Put the Whisper checkpoint where voice.py expects it.
+
+    Unlike the other targets this one may download. The rest of this script only
+    copies what is already in the Hugging Face cache, but the Whisper checkpoint
+    is small, and a `--voice` run that ends by telling you to go and run the demo
+    first would not have prepared the offline machine it exists to prepare.
+    """
+    destination = MODELS_DIR / "faster-whisper" / STT_MODEL
+    if destination.exists() and not force:
+        size = directory_size_mb(destination)
+        print(f"  {'faster-whisper/' + STT_MODEL:<26} already present ({size:,.0f} MB) - skipping")
+        return True
+
+    print(f"  {'faster-whisper/' + STT_MODEL:<26} downloading ...", flush=True)
+    try:
+        from huggingface_hub import snapshot_download
+
+        snapshot_download(
+            _whisper_repo(STT_MODEL),
+            local_dir=str(destination),
+            allow_patterns=["*.bin", "*.json", "*.txt", "*.model"],
+        )
+    except Exception as error:  # noqa: BLE001
+        print(f"  {'faster-whisper/' + STT_MODEL:<26} FAILED - {type(error).__name__}: {error}")
+        return False
+
+    print(f"  {'faster-whisper/' + STT_MODEL:<26} done ({directory_size_mb(destination):,.0f} MB)")
+    return True
+
+
+def vendor_voice(force: bool) -> bool:
+    """Whisper from the hub, Kokoro from its GitHub release."""
+    print()
+    print("Voice models:")
+    whisper_ok = fetch_whisper(force)
+    kokoro_ok = all(
+        download(f"{KOKORO_RELEASE}/{name}", KOKORO_DIR / name, note, force)
+        for name, note in KOKORO_FILES
+    )
+    if not kokoro_ok:
+        # Not fatal: voice.py falls back to Windows SAPI, which needs no download.
+        print("  Kokoro unavailable - voice mode will use the Windows SAPI fallback.")
+    return whisper_ok
+
+
 def main() -> None:
     args = parse_args()
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -114,6 +223,9 @@ def main() -> None:
 
     print(f"Vendoring into {MODELS_DIR}\n")
     ok = all(vendor(repo, folder, note, args.force) for repo, folder, note in targets)
+
+    if args.voice:
+        ok = vendor_voice(args.force) and ok
 
     total = sum(directory_size_mb(p) for p in MODELS_DIR.iterdir() if p.is_dir())
     print(f"\nmodels/ is now {total:,.0f} MB.")

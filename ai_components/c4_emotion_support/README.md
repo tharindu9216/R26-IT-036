@@ -229,6 +229,7 @@ c4_emotion_support/
 │   ├── qwen_generator.py        Qwen3-4B loader, 4-bit, adapter on/off per turn
 │   ├── strategy_mapping.py      C4 <-> ESConv strategy bridge + route selection
 │   ├── response_generator.py    strategy templates (fallback)
+│   ├── voice.py                 speech in (Whisper) and out (Kokoro / SAPI)
 │   └── safety.py                regex crisis screen
 ├── models/                      generated, gitignored — see models/README.md
 └── sample_outputs/
@@ -347,6 +348,105 @@ never silently misrepresents which configuration produced its output.
 For a full walkthrough of moving the demo to another machine — which model files
 to copy, installing a CUDA PyTorch build, and verifying before you present — see
 [SETUP_SECOND_MACHINE.md](SETUP_SECOND_MACHINE.md).
+
+## Voice mode
+
+Push-to-talk speech in and spoken replies out, off by default:
+
+```powershell
+python vendor_models.py --voice      # ~310 MB, one time
+$env:C4_VOICE = "1"
+streamlit run streamlit_app.py
+```
+
+Or leave the environment variable alone and flip **Voice mode (push to talk)**
+in the sidebar. Record, stop, and the turn is transcribed and sent in one
+gesture — there is no confirm-and-send step, because a confirmation removes the
+point of talking.
+
+### What it costs
+
+Speech does not touch the GPU. That is the whole design constraint: the VRAM
+table above leaves ~0.8 GB of margin in low-VRAM mode, and spending it here
+would take it from the 4B reply model, which is the one component that cannot be
+made smaller without changing what the demo demonstrates.
+
+| Stage | Model | Where | Measured |
+|---|---|---|---|
+| Speech in | faster-whisper `base.en`, int8 | CPU | ~0.8 s for 4 s of audio |
+| Speech out | Kokoro-82M, fp16 ONNX | CPU | RTF 0.35 (a 6.9 s reply in 2.4 s) |
+| Reply | Qwen3-4B NF4 | GPU | unchanged |
+
+A spoken turn end to end measured **~4 s** on the reference laptop (i5-11th gen,
+RTX 2050 4 GB) — most of it generation, not speech.
+
+Two settings exist to keep it that way, and both are visible in the sidebar:
+
+* **Explanations are paused while voice mode is on.** `IG_STEPS` is 64
+  forward+backward passes across two models. That is affordable when you are
+  reading a trace and fatal when you are waiting to be answered. Switching voice
+  mode off restores whatever the XAI toggle was set to.
+* **The reply budget drops to `LLM_VOICE_MAX_NEW_TOKENS` (64).** Generation is
+  most of a spoken turn's latency, so this is the largest lever available — and
+  it cuts the right way anyway, since a reply that is listened to wants to be
+  shorter than one that is read.
+
+### Why these two models
+
+**faster-whisper over whisper.cpp** — the same speed on this class of CPU, but
+it decodes from an in-memory buffer instead of a temp WAV. The recording is
+someone describing their distress; whisper.cpp's Windows path is a subprocess
+over a file, which gives that up for about 0.2 s.
+
+**Whisper over Vosk** — Whisper emits casing and punctuation, which keeps
+transcripts inside the distribution the RoBERTa classifier and the TextCNN
+forecaster were trained on. Lowercase, unpunctuated ASR output is a real shift
+in what those two models see, for 100 MB saved.
+
+**Kokoro fp16, not int8** — int8 is the smallest download and the obvious
+default, and it measured **~4x slower**: RTF 1.45 against 0.34, because ONNX
+int8 on this CPU spends more in quantise/dequantise than the narrower weights
+save. onnxruntime's thread default costs another 40% on a hyperthreaded laptop
+(8 threads ran the same reply in 4.29 s against 2.47 s at 4), so the session is
+built at one thread per physical core. Both numbers are in `config.py`.
+
+**A Windows SAPI fallback under Kokoro** — the realistic failure mode for neural
+TTS on Windows is not quality or speed, it is the phonemiser refusing to load on
+a machine that was never set up for it. If Kokoro does not load, `voice.py`
+falls back to .NET's `System.Speech` through a fresh PowerShell process, which
+needs no package at all. It sounds worse and it always works; the sidebar says
+which one is live.
+
+### The tradeoff this makes
+
+Auto-submit means a transcription error reaches the pipeline unreviewed —
+including `safety.py`'s crisis regex, where a mis-hearing is a missed detection,
+and a miss is the expensive failure. That is mitigated rather than prevented:
+
+* the transcript is shown in the user's own bubble, so an error is visible;
+* Whisper's mean token log-probability is recorded on every voice turn and a
+  doubtful one is captioned in the chat;
+* **Undo turn** removes the last exchange before it can bias the forecaster's
+  context or the emotion chart.
+
+Every trace records `input_modality` and, for spoken turns, a `voice_input`
+block with the backend, the model, the clip duration and the confidence — so
+voice and typed turns can be reported separately rather than assumed equivalent.
+
+Prosody is discarded. Emotion is still classified from text alone, which means
+the richest emotional signal in a spoken turn is thrown away before Stage 1.
+That is a deliberate scope limit, not an oversight — an audio-emotion branch is
+a different piece of work — and it is the first thing to say about these results.
+
+Verify the whole path end to end, which is the check worth running on a second
+machine:
+
+```powershell
+python smoke_test.py --voice
+```
+
+It synthesises a line, transcribes it back, and asserts the round trip recovers
+the sentence. Both backends can fail independently and neither failure is loud.
 
 ## What the demo shows
 

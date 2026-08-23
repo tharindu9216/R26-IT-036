@@ -68,6 +68,8 @@ def run_c4_pipeline(
     explain: bool = True,
     dialogue_history: Optional[Sequence[Tuple[str, str]]] = None,
     use_llm: bool = True,
+    max_new_tokens: Optional[int] = None,
+    voice_input: Optional[Dict[str, object]] = None,
 ) -> Dict[str, object]:
     conversation_state.setdefault("emotion_history", [])
     conversation_state.setdefault("pipeline_traces", [])
@@ -133,6 +135,7 @@ def run_c4_pipeline(
             strategy=strategy["strategy"],
             safety=safety,
             dialogue_history=dialogue_history,
+            max_new_tokens=max_new_tokens,
         )
         response = {"response": reply_state["reply"], "strategy": strategy["strategy"]}
     else:
@@ -172,6 +175,11 @@ def run_c4_pipeline(
 
     trace = {
         "user_message": user_message,
+        # "voice" turns reached the classifier through Whisper, so their text is
+        # not the user's words but a transcription of them. Recorded here so the
+        # two input modalities can be compared rather than conflated.
+        "input_modality": "voice" if voice_input else "text",
+        "voice_input": dict(voice_input) if voice_input else None,
         "current_emotion": current_output.label,
         "current_emotion_confidence": current_output.confidence,
         "current_emotion_probabilities": current_output.probabilities,
