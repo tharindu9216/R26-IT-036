@@ -16,11 +16,10 @@ gitignored, so it does not travel with the repository; copy it by hand (USB,
 network share, cloud drive).
 
 ```text
-models/                              8,819 MB total
+models/                              8,314 MB total
 ├── qwen3-4b-instruct/               7,687 MB   reply generation base model
 ├── current_emotion_classifier/        479 MB   RoBERTa, 5 labels
-├── next_emotion_forecaster/           259 MB   TextCNN / BiLSTM / DistilBERT checkpoints
-├── distilbert-base-uncased/           256 MB   base for the DistilBERT forecaster
+├── next_emotion_forecaster/            10 MB   TextCNN / BiLSTM / BiGRU / CNN-BiLSTM state checkpoints
 └── esconv_reply_adapter/              137 MB   the trained ESConv LoRA
 ```
 
@@ -33,13 +32,12 @@ Hugging Face cache pointed at a non-existent directory and
 
 | Drop | Saves | Cost |
 |---|---|---|
-| `distilbert-base-uncased/` | 256 MB | the DistilBERT forecaster option fails to load; TextCNN (the default) and BiLSTM still work |
-| `next_emotion_forecaster/distilbert_forecast.pt` | 253 MB | same as above |
 | `esconv_reply_adapter/` | 137 MB | replies come from the un-fine-tuned base model |
+| `next_emotion_forecaster/archive_8label/` | 271 MB | nothing — these are the superseded next-*emotion* checkpoints, kept only until the retrain is signed off |
 
-Dropping both DistilBERT pieces takes the transfer from 8.8 GB to **8.3 GB**.
-The sidebar still lists DistilBERT and reports the load failure honestly if you
-select it, so nothing breaks silently.
+The four state-forecaster checkpoints total 10 MB, so there is nothing worth
+trimming there. Dropping a checkpoint the sidebar still lists produces an
+honest load failure rather than a silent fallback.
 
 `qwen3-4b-instruct/` is not optional — without it there is no reply generation
 at all, only templates.
@@ -54,9 +52,10 @@ three small folders (`current_emotion_classifier`, `next_emotion_forecaster`,
 python vendor_models.py
 ```
 
-That downloads Qwen3-4B and DistilBERT from Hugging Face and lays them out
-locally. `--list` reports what is already present; `--skip-distilbert` omits the
-optional one.
+That downloads Qwen3-4B from Hugging Face and lays it out locally. `--list`
+reports what is already present. The forecaster checkpoints are not downloaded
+— they are a few megabytes, they live in the repository, and
+`emotion_forecasting_pipeline/export_to_c4.py` produces them.
 
 ### Why not just copy the Hugging Face cache
 
@@ -76,7 +75,6 @@ that has vendored nothing still works if it has network:
 |---|---|
 | Base model | `$env:C4_BASE_MODEL` → `models/qwen3-4b-instruct/` → hub `Qwen/Qwen3-4B-Instruct-2507` |
 | Adapter | `$env:C4_ADAPTER_PATH` → `models/esconv_reply_adapter/` → `../../../qwen3_esconv_finetune/outputs/.../final_adapter/` |
-| DistilBERT | `models/distilbert-base-uncased/` → hub `distilbert-base-uncased` |
 
 Nothing needs configuring on the second machine — copying `models/` is enough.
 

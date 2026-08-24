@@ -1,20 +1,52 @@
-"""Next-turn emotion forecasting.
+"""Next-turn emotion-STATE forecasting.
 
-Loads one of the checkpoints trained by ../../../forcasting/train_deep.py:
+Loads a checkpoint trained by `../../../emotion_forecasting_pipeline`:
 
-    textcnn_forecast.pt      test acc 0.7217  macro-F1 0.7003   (0.6 MB)
-    bilstm_forecast.pt       test acc 0.7164  macro-F1 0.6903   (5.6 MB)
-    distilbert_forecast.pt   test acc 0.7177  macro-F1 0.7025   (265 MB)
+    textcnn_state_forecast.pt
+    bilstm_state_forecast.pt
+    bigru_state_forecast.pt
+    cnn_bilstm_state_forecast.pt
 
-Model input is the dialogue-context string (previous k turns + the current
-utterance) plus the speaker's *current* emotion as an auxiliary embedded
-feature. The current emotion arrives from the RoBERTa classifier in a different
-label space, so it goes through `label_mapping.aux_emotion_id` first.
+What this model predicts
+------------------------
+Not "which emotion comes next" -- the previous forecaster did that, and a
+persistence baseline matched it, because an emotion label barely moves from one
+turn to the next. This one predicts the next emotional *state*: the emotion
+together with where its intensity is going (`high_sadness`, `low_joy`,
+`neutral`, ...). `low_sadness` and `high_sadness` are the same emotion and
+opposite situations, and that difference is the point.
 
-Honest caveat kept visible in the trace: the checkpoints were trained on a
-synthetic, template-generated corpus whose vocabulary is only 528 tokens, so
-free-text demo input hits `<unk>` often. `unk_rate` is reported per prediction
-and the UI warns when it is high.
+Model input
+-----------
+The current utterance plus the speaker's current emotion, and nothing else.
+The training corpus also ships a `context_text` column; it was generated from
+the target state and a TF-IDF model trained on it scores 1.0000 test accuracy.
+It is a leak, not a feature, and this class never touches it. The retrained
+model therefore does not read dialogue history at all -- `dialogue_history` is
+still accepted so existing callers do not break, and is ignored by design.
+
+The current emotion arrives from the RoBERTa classifier in the *same* five
+labels the forecaster was conditioned on, so no projection is needed; it is
+embedded as an auxiliary feature via `label_mapping.aux_emotion_id`.
+
+Transition constraint
+---------------------
+The corpus transition rules are deterministic: from `sadness` the only
+reachable next states are `low_sadness`, `high_sadness` and `neutral`. The
+forecast distribution is masked to the reachable set, so the pipeline can never
+be handed `high_joy` for a user who is currently sad. See
+`config.FORECAST_CONSTRAIN_TRANSITIONS`.
+
+Honest caveat, kept visible in the trace rather than buried
+-----------------------------------------------------------
+The `next_emotion_state` labels are synthetic and rule-constrained. Measured on
+the held-out split, the utterance text carries no usable signal about which of
+the reachable states follows: a TF-IDF model on the text alone scores at or
+below the majority baseline within every current-emotion group. What the model
+reliably learns is the transition structure. So a forecast here is a calibrated
+statement about *which states are possible and their base rates*, not evidence
+that this particular sentence predicts escalation. `trained_signal` in
+`status()` reports that, and the UI says it out loud.
 """
 
 import json
@@ -25,28 +57,30 @@ import torch
 
 from config import (
     DEFAULT_FORECASTER,
-    DISTILBERT_BASE,
-    FORECAST_CONTEXT_TURNS,
+    FORECAST_CONSTRAIN_TRANSITIONS,
     FORECAST_LABELS,
-    NEGATIVE,
-    NEUTRAL,
-    POSITIVE,
 )
 from .forecast_models import (
     UNK,
-    BiLSTMAttention,
-    DistilBertClassifier,
-    TextCNN,
-    build_context_text,
+    build_model,
     encode,
     simple_tokenize,
 )
-from .label_mapping import UNKNOWN_AUX_ID, aux_emotion_id
+from .label_mapping import (
+    UNKNOWN_AUX_ID,
+    aux_emotion_id,
+    is_deteriorating,
+    reachable_states,
+    state_base_emotion,
+    state_intensity,
+    trajectory,
+)
 
 CHECKPOINT_FILES = {
-    "textcnn": "textcnn_forecast.pt",
-    "bilstm": "bilstm_forecast.pt",
-    "distilbert": "distilbert_forecast.pt",
+    "textcnn": "textcnn_state_forecast.pt",
+    "bilstm": "bilstm_state_forecast.pt",
+    "bigru": "bigru_state_forecast.pt",
+    "cnn_bilstm": "cnn_bilstm_state_forecast.pt",
 }
 
 
@@ -58,25 +92,25 @@ class EmotionForecaster:
         force_fallback: bool = False,
         architecture: str = DEFAULT_FORECASTER,
         device: Optional[str] = None,
-        context_turns: int = FORECAST_CONTEXT_TURNS,
+        constrain_transitions: bool = FORECAST_CONSTRAIN_TRANSITIONS,
     ) -> None:
         self.model_path = Path(model_path)
         self.labels = labels or list(FORECAST_LABELS)
         self.force_fallback = force_fallback
         self.architecture = architecture
-        self.context_turns = context_turns
+        self.constrain_transitions = constrain_transitions
         self.device = torch.device(
             device or ("cuda" if torch.cuda.is_available() else "cpu")
         )
 
         self.model = None
         self.vocab: Dict[str, int] = {}
-        self.tokenizer = None          # only for distilbert
         self.params: Dict[str, object] = {}
-        self.max_len = 64
+        self.max_len = 120
         self.model_type = "rule"
         self.fallback = True
         self.load_error: Optional[str] = None
+        self.meta: Dict[str, object] = {}
 
         self._load_meta()
         self._try_load_model()
@@ -89,12 +123,12 @@ class EmotionForecaster:
             return
         try:
             meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            self.meta = meta
             label2id = meta.get("label2id") or {}
             if label2id:
                 self.labels = [
                     label for label, _ in sorted(label2id.items(), key=lambda kv: kv[1])
                 ]
-            self.context_turns = int(meta.get("context", self.context_turns))
         except Exception as error:  # pragma: no cover
             self.load_error = f"meta_forecast.json unreadable: {error}"
 
@@ -116,38 +150,22 @@ class EmotionForecaster:
                 checkpoint_path, map_location="cpu", weights_only=False
             )
             self.params = dict(checkpoint.get("params", {}))
-            self.max_len = int(self.params.get("max_len", 64))
-            n_classes = len(self.labels)
-            n_emo = len(self.labels)
+            self.max_len = int(checkpoint.get("max_len", 120))
+            self.vocab = checkpoint["vocab"]
 
-            if self.architecture == "distilbert":
-                from transformers import AutoTokenizer
+            label2id = checkpoint.get("label2id") or {}
+            if label2id:
+                self.labels = [
+                    label for label, _ in sorted(label2id.items(), key=lambda kv: kv[1])
+                ]
 
-                self.tokenizer = AutoTokenizer.from_pretrained(DISTILBERT_BASE)
-                model = DistilBertClassifier(
-                    DISTILBERT_BASE,
-                    n_classes,
-                    n_emo,
-                    dropout=float(self.params.get("dropout", 0.2)),
-                )
-            else:
-                self.vocab = checkpoint["vocab"]
-                if self.architecture == "bilstm":
-                    model = BiLSTMAttention(
-                        len(self.vocab), n_classes, n_emo,
-                        emb_dim=int(self.params.get("emb_dim", 200)),
-                        hidden=int(self.params.get("hidden", 192)),
-                        layers=int(self.params.get("layers", 1)),
-                        dropout=float(self.params.get("dropout", 0.3)),
-                    )
-                else:
-                    model = TextCNN(
-                        len(self.vocab), n_classes, n_emo,
-                        emb_dim=int(self.params.get("emb_dim", 200)),
-                        n_filters=int(self.params.get("n_filters", 128)),
-                        dropout=float(self.params.get("dropout", 0.4)),
-                    )
-
+            model = build_model(
+                self.architecture,
+                vocab_size=len(self.vocab),
+                n_classes=len(self.labels),
+                n_emo=UNKNOWN_AUX_ID,
+                params=self.params,
+            )
             # strict=True on purpose: a silently partial load would produce
             # confident nonsense rather than an error we can show in the UI.
             model.load_state_dict(checkpoint["state_dict"], strict=True)
@@ -157,60 +175,64 @@ class EmotionForecaster:
             self.model_type = self.architecture
             self.fallback = False
             self.load_error = None
+            self.checkpoint_metrics = checkpoint.get("test_metrics", {})
         except Exception as error:
             self.model = None
             self.fallback = True
             self.load_error = f"{type(error).__name__}: {error}"
 
     # ------------------------------------------------------------------ encoding
-    def build_context(
-        self,
-        current_message: str,
-        history: Optional[Sequence[Tuple[str, str]]] = None,
-    ) -> str:
-        return build_context_text(history or [], current_message, self.context_turns)
+    def encode_context(self, text: str):
+        """Token ids / lengths for the loaded architecture.
 
-    def encode_context(self, context_text: str):
-        """Token ids / attention mask for the loaded architecture."""
-        if self.architecture == "distilbert":
-            enc = self.tokenizer(
-                context_text,
-                truncation=True,
-                padding="max_length",
-                max_length=self.max_len,
-                return_tensors="pt",
-            )
-            return (
-                enc["input_ids"].to(self.device),
-                enc["attention_mask"].to(self.device),
-            )
-        ids, length = encode(context_text, self.vocab, self.max_len)
+        Named `encode_context` for continuity with the previous forecaster's
+        interface (xai.py calls it), but the text is a single utterance now,
+        not a dialogue context window.
+        """
+        ids, length = encode(text, self.vocab, self.max_len)
         x = torch.tensor([ids], dtype=torch.long, device=self.device)
         lens = torch.tensor([max(length, 1)], dtype=torch.long, device=self.device)
         return x, lens
 
-    def unk_rate(self, context_text: str) -> float:
+    def unk_rate(self, text: str) -> float:
         """Share of tokens that fall outside the training vocabulary."""
-        if self.architecture == "distilbert" or not self.vocab:
+        if not self.vocab:
             return 0.0
-        tokens = simple_tokenize(context_text)
+        tokens = simple_tokenize(text)
         if not tokens:
             return 0.0
         unknown = sum(1 for token in tokens if self.vocab.get(token, UNK) == UNK)
         return unknown / len(tokens)
 
     # ------------------------------------------------------------------ inference
-    def _model_probabilities(self, context_text: str, aux_id: int) -> Dict[str, float]:
+    def _model_probabilities(
+        self, text: str, aux_id: int, current_emotion: Optional[str] = None
+    ) -> Dict[str, float]:
         aux = torch.tensor([aux_id], dtype=torch.long, device=self.device)
         with torch.no_grad():
-            if self.architecture == "distilbert":
-                input_ids, attention = self.encode_context(context_text)
-                logits = self.model(input_ids, attention, aux)
-            else:
-                x, lens = self.encode_context(context_text)
-                logits = self.model(x, lens, aux)
-            probs = torch.softmax(logits.float().squeeze(0), dim=-1)
+            x, lens = self.encode_context(text)
+            logits = self.model(x, lens, aux).float().squeeze(0)
+            if self.constrain_transitions and current_emotion is not None:
+                logits = self._mask_logits(logits, current_emotion)
+            probs = torch.softmax(logits, dim=-1)
         return {label: float(probs[i]) for i, label in enumerate(self.labels)}
+
+    def _mask_logits(self, logits: torch.Tensor, current_emotion: str) -> torch.Tensor:
+        """-inf everything the transition rules make unreachable.
+
+        Masking the logits rather than zeroing probabilities keeps the result a
+        proper softmax over the reachable set, so `confidence` stays comparable
+        across turns.
+        """
+        allowed = set(reachable_states(current_emotion))
+        mask = torch.tensor(
+            [label in allowed for label in self.labels],
+            dtype=torch.bool,
+            device=logits.device,
+        )
+        if not bool(mask.any()):
+            return logits
+        return logits.masked_fill(~mask, float("-inf"))
 
     def predict(
         self,
@@ -221,56 +243,83 @@ class EmotionForecaster:
         current_message: str = "",
         dialogue_history: Optional[Sequence[Tuple[str, str]]] = None,
     ) -> Dict[str, object]:
-        """Forecast the user's next-turn emotion.
+        """Forecast the user's next-turn emotional state.
 
-        `history` is the list of past *emotion labels* (used by the rule
-        fallback); `dialogue_history` is the list of (speaker, text) turns the
-        trained model actually consumes.
+        `history` (past emotion labels) is used only by the rule fallback.
+        `dialogue_history` is accepted and ignored: the retrained model's
+        leakage-safe feature set is the current utterance plus the current
+        emotion, and nothing else. See the module docstring.
         """
         if self.fallback or self.model is None:
             result = self._rule_based_forecast(current_emotion, history, deviation_level)
-            result["context_text"] = ""
+            result["input_text"] = current_message
             result["unk_rate"] = 0.0
             result["aux_emotion_id"] = UNKNOWN_AUX_ID
-            return result
+            result["aux_emotion_label"] = current_emotion or "unknown"
+            return self._decorate(result, current_emotion)
 
-        context_text = self.build_context(current_message, dialogue_history)
         aux_id = aux_emotion_id(current_emotion)
-        probabilities = self._model_probabilities(context_text, aux_id)
+        probabilities = self._model_probabilities(
+            current_message, aux_id, current_emotion
+        )
         label = max(probabilities, key=probabilities.__getitem__)
-        return {
+        result = {
             "label": label,
             "confidence": probabilities[label],
             "probabilities": probabilities,
             "source": self.architecture,
-            "context_text": context_text,
-            "unk_rate": self.unk_rate(context_text),
+            "input_text": current_message,
+            "unk_rate": self.unk_rate(current_message),
             "aux_emotion_id": aux_id,
             "aux_emotion_label": (
-                self.labels[aux_id] if aux_id < len(self.labels) else "unknown"
+                self.labels[aux_id] if aux_id < UNKNOWN_AUX_ID else "unknown"
             ),
         }
+        return self._decorate(result, current_emotion)
+
+    def _decorate(
+        self, result: Dict[str, object], current_emotion: Optional[str]
+    ) -> Dict[str, object]:
+        """Attach the decomposition that makes a state more than a label."""
+        label = str(result["label"])
+        result["aux_emotion_label"] = current_emotion or "unknown"
+        result["base_emotion"] = state_base_emotion(label)
+        result["intensity"] = state_intensity(label)
+        result["trajectory"] = trajectory(current_emotion, label)
+        result["deteriorating"] = is_deteriorating(current_emotion, label)
+        result["reachable_states"] = reachable_states(current_emotion)
+        result["constrained"] = bool(
+            self.constrain_transitions and not self.fallback
+        )
+        return result
 
     def counterfactual_by_current_emotion(
         self,
-        context_text: str,
+        text: str,
     ) -> Dict[str, Dict[str, object]]:
         """Re-run the forecast under every possible current emotion.
 
-        The aux feature is the single strongest signal this model has, so
-        sweeping it shows how much of the forecast is driven by the classifier's
-        output versus by the text itself.
+        The aux feature is the strongest signal this model has, so sweeping it
+        shows how much of the forecast is driven by the classifier's output
+        versus by the text. With the transition mask on, the sweep also makes
+        the constraint visible: each assumed emotion admits a different set of
+        states.
         """
         if self.fallback or self.model is None:
             return {}
+        from config import FORECAST_CURRENT_EMOTIONS
+
         results: Dict[str, Dict[str, object]] = {}
-        for aux_id, aux_label in enumerate(self.labels):
-            probabilities = self._model_probabilities(context_text, aux_id)
+        for emotion in FORECAST_CURRENT_EMOTIONS:
+            probabilities = self._model_probabilities(
+                text, aux_emotion_id(emotion), emotion
+            )
             top = max(probabilities, key=probabilities.__getitem__)
-            results[aux_label] = {
+            results[emotion] = {
                 "label": top,
                 "confidence": probabilities[top],
                 "probabilities": probabilities,
+                "trajectory": trajectory(emotion, top),
             }
         return results
 
@@ -278,47 +327,48 @@ class EmotionForecaster:
     def _rule_based_forecast(
         self, current_emotion: str, history: List[str], deviation_level: str
     ) -> Dict[str, object]:
-        """Persistence-style heuristic used when no checkpoint is available.
+        """Persistence heuristic used when no checkpoint is available.
 
-        Deliberately close to `baseline_persistence` from the training pipeline
-        (test macro-F1 0.7098) -- emotion has strong inertia, so "the same as
-        now" is a genuinely strong guess.
+        Deliberately close to the `baseline_prior_by_current_emotion` reference
+        in the training pipeline: stay in the current emotion, and let the
+        deviation level decide whether it is escalating or easing. On this
+        corpus that baseline is genuinely competitive, which is a fact about
+        the labels rather than a compliment to the heuristic.
         """
-        if current_emotion in POSITIVE:
-            label, confidence = "happy", 0.70
-        elif current_emotion in NEUTRAL:
-            label, confidence = "neutral", 0.60
-        elif current_emotion in NEGATIVE:
-            if deviation_level == "High":
-                label, confidence = "anxious", 0.65
-            else:
-                label = {
-                    "sadness": "sad",
-                    "sad": "sad",
-                    "anger": "angry",
-                    "angry": "angry",
-                    "fear": "anxious",
-                    "anxious": "anxious",
-                    "stressed": "stressed",
-                }.get(current_emotion, "stressed")
-                confidence = 0.70
-        else:
+        if current_emotion == "neutral" or current_emotion is None:
             label, confidence = "neutral", 0.55
+        elif current_emotion in ("joy", "sadness", "anger", "fear"):
+            intensity = "high" if deviation_level == "High" else "low"
+            label = f"{intensity}_{current_emotion}"
+            confidence = 0.60
+        else:
+            label, confidence = "neutral", 0.45
 
         return {
             "label": label,
             "confidence": confidence,
-            "probabilities": self._build_probabilities(label, confidence),
+            "probabilities": self._build_probabilities(
+                label, confidence, current_emotion
+            ),
             "source": "rule",
         }
 
-    def _build_probabilities(self, label: str, confidence: float) -> Dict[str, float]:
-        other_labels = [item for item in self.labels if item != label]
-        if not other_labels:
-            return {label: 1.0}
-        share = max(0.0, 1.0 - confidence) / len(other_labels)
-        probs = {item: share for item in other_labels}
+    def _build_probabilities(
+        self, label: str, confidence: float, current_emotion: Optional[str] = None
+    ) -> Dict[str, float]:
+        """Spread the remaining mass over the states that are actually reachable."""
+        allowed = set(reachable_states(current_emotion)) & set(self.labels)
+        if label not in allowed:
+            allowed = set(self.labels)
+        others = [item for item in allowed if item != label]
+        probs = {item: 0.0 for item in self.labels}
         probs[label] = confidence
+        if others:
+            share = max(0.0, 1.0 - confidence) / len(others)
+            for item in others:
+                probs[item] = share
+        else:
+            probs[label] = 1.0
         return probs
 
     # ------------------------------------------------------------------ status
@@ -333,6 +383,11 @@ class EmotionForecaster:
             "labels": list(self.labels),
             "vocab_size": len(self.vocab) if self.vocab else None,
             "max_len": self.max_len,
-            "context_turns": self.context_turns,
+            "constrain_transitions": self.constrain_transitions,
             "load_error": self.load_error,
+            "target": "next_emotion_state",
+            "trained_signal": (
+                "transition structure only -- the utterance text does not "
+                "separate the reachable states on this synthetic corpus"
+            ),
         }

@@ -1,12 +1,13 @@
 """Headless end-to-end check of the C4 pipeline.
 
-Runs a multi-turn conversation through every forecaster checkpoint plus the
-rule fallback, exercising classification, deviation tracking, forecasting,
-strategy selection and all three XAI methods. Prints a compact report and exits
-non-zero on failure, so it is usable as a pre-demo sanity check.
+Runs a multi-turn conversation through the next-emotion-state forecaster
+checkpoints plus the rule fallback, exercising classification, deviation
+tracking, state forecasting, strategy selection and all three XAI methods.
+Prints a compact report and exits non-zero on failure, so it is usable as a
+pre-demo sanity check.
 
-    python smoke_test.py             # textcnn + bilstm + rule fallback
-    python smoke_test.py --all       # also distilbert (265 MB, slower)
+    python smoke_test.py             # bigru + textcnn + rule fallback
+    python smoke_test.py --all       # all four checkpoints
     python smoke_test.py --llm       # also load Qwen3-4B and generate for real
 """
 
@@ -22,6 +23,7 @@ import wave
 from c4_pipeline import run_c4_pipeline
 from c4_pipeline.emotion_classifier import EmotionClassifier
 from c4_pipeline.emotion_forecaster import EmotionForecaster
+from c4_pipeline.label_mapping import TRAJECTORIES, reachable_states
 from config import (
     CURRENT_EMOTION_MODEL_PATH,
     EMOTION_LABELS,
@@ -87,8 +89,9 @@ def run_case(classifier, architecture, force_fallback):
             f"({trace['current_emotion_confidence']:.2f})"
             f" | prev={str(trace['previous_emotion']):8s}"
             f" dev={trace['deviation_level']:8s}"
-            f" | next={trace['forecasted_next_emotion']:8s}"
+            f" | next={trace['forecasted_next_emotion']:13s}"
             f"({trace['forecast_confidence']:.2f})"
+            f" {str(trace['forecast_trajectory']):11s}"
             f" -> {trace['selected_strategy']}"
         )
 
@@ -100,7 +103,26 @@ def run_case(classifier, architecture, force_fallback):
         )
         check(
             set(probabilities) == set(FORECAST_LABELS),
-            f"turn {turn} forecast covers all 8 labels",
+            f"turn {turn} forecast covers all 13 next-state labels",
+        )
+        # The transition rules are deterministic, so an unreachable state
+        # carrying probability is a bug, not an unlikely prediction.
+        allowed = set(reachable_states(trace["current_emotion"]))
+        leaked = {
+            label: value for label, value in probabilities.items()
+            if label not in allowed and value > 1e-6
+        }
+        check(
+            not leaked or force_fallback,
+            f"turn {turn} no mass on unreachable states ({sorted(leaked)})",
+        )
+        check(
+            trace["forecast_trajectory"] in TRAJECTORIES,
+            f"turn {turn} trajectory {trace['forecast_trajectory']!r} is a known value",
+        )
+        check(
+            trace["forecast_base_emotion"] in EMOTION_LABELS,
+            f"turn {turn} forecast base emotion in classifier label set",
         )
         projected = trace["forecast_probabilities_projected"]
         check(
@@ -131,8 +153,8 @@ def run_case(classifier, architecture, force_fallback):
             check(forecaster_xai.get("available", False), f"turn {turn} forecaster IG available")
             counterfactual = explanations.get("forecaster_counterfactual", {})
             check(
-                len(counterfactual.get("sweep", {})) == 8,
-                f"turn {turn} counterfactual sweep covers 8 current emotions",
+                len(counterfactual.get("sweep", {})) == len(EMOTION_LABELS),
+                f"turn {turn} counterfactual sweep covers all current emotions",
             )
 
         if turn == 1 and not force_fallback:
@@ -151,15 +173,18 @@ def run_case(classifier, architecture, force_fallback):
     check(final["selected_strategy"] == "Safe Fallback", "crisis message selects Safe Fallback")
     check(len(state["emotion_history"]) == len(CONVERSATION), "emotion history has one row per turn")
 
-    # Context must actually accumulate across turns.
+    # The forecaster reads the current utterance and nothing else: the corpus's
+    # dialogue-context column is target-derived, so feeding history back in
+    # would reintroduce the leak the retrain removed.
     if not force_fallback:
         check(
-            "[supporter]" in final["forecast_context_text"],
-            "dialogue context includes previous supporter turns",
+            final["forecast_input_text"] == final["user_message"],
+            "forecaster input is the current utterance verbatim",
         )
         check(
-            "[SEP]" in final["forecast_context_text"],
-            "dialogue context uses the trained [SEP] format",
+            "[supporter]" not in final["forecast_input_text"]
+            and "[SEP]" not in final["forecast_input_text"],
+            "forecaster input carries no dialogue-context markers",
         )
 
 
@@ -188,14 +213,21 @@ def run_safety_cases() -> None:
         )
 
 
+# (message, current emotion, forecast next STATE, strategy, crisis, expected route)
+#
+# `forecast` is a next-emotion state now, not one of the retired 8 emotion
+# labels -- the router reads its projected base emotion, which is what
+# `pipeline.py` passes it.
 REPLY_GRAPH_CASES = [
-    # (message, current, forecast, strategy, crisis, expected route)
-    ("I feel hopeless about my exams.", "sadness", "sad", "Comfort", False, "adapter"),
-    ("I got the job I wanted!", "joy", "happy", "Maintain Tone", False, "base"),
+    ("I feel hopeless about my exams.", "sadness", "high_sadness", "Comfort", False, "adapter"),
+    ("I got the job I wanted!", "joy", "high_joy", "Maintain Tone", False, "base"),
     ("Nothing much, just a normal day.", "neutral", "neutral", "Maintain Tone", False, "base"),
     # Neutral now, deteriorating: the forecast alone must pull it to the adapter.
-    ("It is fine I suppose.", "neutral", "stressed", "Reassure", False, "adapter"),
-    ("I think about ending my life.", "sadness", "sad", "Safe Fallback", True, "crisis"),
+    ("It is fine I suppose.", "neutral", "fear", "Reassure", False, "adapter"),
+    # An easing negative still routes to the adapter -- the emotion is present,
+    # only its direction is favourable.
+    ("It still hurts but less than yesterday.", "sadness", "low_sadness", "Encourage", False, "adapter"),
+    ("I think about ending my life.", "sadness", "high_sadness", "Safe Fallback", True, "crisis"),
 ]
 
 
@@ -209,6 +241,7 @@ def run_reply_graph_cases(with_llm: bool = False) -> None:
     With `--llm`, Qwen3-4B is loaded and the same cases run for real, so the
     prompt, the generation and the output guard are exercised end to end.
     """
+    from c4_pipeline.label_mapping import forecast_to_classifier_label
     from c4_pipeline.reply_graph import generate_supportive_reply, set_generator
     from c4_pipeline.strategy_mapping import ESCONV_STRATEGIES
 
@@ -237,7 +270,9 @@ def run_reply_graph_cases(with_llm: bool = False) -> None:
             current_emotion=current,
             current_emotion_confidence=0.8,
             forecast_emotion=forecast,
-            forecast_emotion_projected=forecast,
+            forecast_emotion_projected=(
+                forecast_to_classifier_label(forecast) or forecast
+            ),
             forecast_confidence=0.7,
             deviation_level="Low",
             deviation_score=0.2,
@@ -420,7 +455,7 @@ def run_voice_cases() -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--all", action="store_true", help="include the distilbert checkpoint")
+    parser.add_argument("--all", action="store_true", help="run all four checkpoints")
     parser.add_argument(
         "--llm",
         action="store_true",
@@ -460,7 +495,9 @@ def main() -> int:
     check(status["available"], "classifier checkpoint loaded")
     check(list(status["labels"]) == list(EMOTION_LABELS), "classifier labels match config")
 
-    architectures = ["textcnn", "bilstm"] + (["distilbert"] if args.all else [])
+    architectures = (
+        ["textcnn", "bilstm", "bigru", "cnn_bilstm"] if args.all else ["bigru", "textcnn"]
+    )
     for architecture in architectures:
         try:
             run_case(classifier, architecture, force_fallback=False)

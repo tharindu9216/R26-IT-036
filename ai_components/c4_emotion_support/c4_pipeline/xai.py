@@ -11,9 +11,11 @@ awkward to install on Windows and add ~400 MB):
    token, measure how far the predicted probability falls. Slower (one forward
    per token) but makes no assumption about gradients being faithful.
 3. **Counterfactual probing** of the forecaster's auxiliary current-emotion
-   feature: re-run the forecast under each of the 8 possible current emotions
-   and report how much the answer moves. This is what shows whether a forecast
-   is driven by the text or is just echoing the classifier.
+   feature: re-run the forecast under each of the 5 possible current emotions
+   and report how much the answer moves. On the retrained next-state forecaster
+   this sweep is the headline explanation rather than a footnote -- it makes
+   visible that the current emotion, not the sentence, is doing the work, and
+   it shows the transition constraint changing the admissible states.
 
 `aggregate_to_words` folds subword pieces back into whole words, because
 "unset" / "##tling" is not an explanation anyone can read.
@@ -51,8 +53,8 @@ def _is_continuation(token: str) -> bool:
     """True when this piece continues the previous word.
 
     RoBERTa BPE marks word *starts* with 'Ġ'; WordPiece marks continuations
-    with '##'. Handling both keeps this usable for the RoBERTa classifier and
-    the DistilBERT forecaster alike.
+    with '##'. The forecaster's word-level tokenizer uses neither, so it falls
+    through to the caller's decision below.
     """
     if token.startswith("##"):
         return True
@@ -293,7 +295,18 @@ def explain_forecaster(
     target_label: Optional[str] = None,
     steps: int = IG_STEPS,
 ) -> Dict[str, object]:
-    """Token attributions over the dialogue context for the forecaster."""
+    """Token attributions over the utterance the forecaster reads.
+
+    `context_text` is the single current utterance now, not a dialogue window --
+    the retrained model's leakage-safe input is that utterance plus the current
+    emotion. The parameter name is kept for continuity with existing callers.
+
+    Read these attributions with the caveat in `EmotionForecaster`'s docstring
+    in mind: on this corpus the text does not separate the reachable next
+    states, so a large attribution marks a token the model reacts to, not
+    evidence that the token predicts escalation. `aux_contribution` below is
+    the honest comparison.
+    """
     if forecaster.fallback or forecaster.model is None:
         return {
             "available": False,
@@ -303,24 +316,14 @@ def explain_forecaster(
     model = forecaster.model
     aux = torch.tensor([aux_id], dtype=torch.long, device=forecaster.device)
 
-    if forecaster.architecture == "distilbert":
-        input_ids, attention_mask = forecaster.encode_context(context_text)
-        embedding_layer = model.encoder.get_input_embeddings()
-        tokens = forecaster.tokenizer.convert_ids_to_tokens(input_ids[0].tolist())
-        pad_id = forecaster.tokenizer.pad_token_id or 0
-        baseline_ids = torch.full_like(input_ids, pad_id)
+    input_ids, lens = forecaster.encode_context(context_text)
+    embedding_layer = model.emb
+    inverse_vocab = {index: token for token, index in forecaster.vocab.items()}
+    tokens = [inverse_vocab.get(i, "<unk>") for i in input_ids[0].tolist()]
+    baseline_ids = torch.full_like(input_ids, PAD)
 
-        def forward_fn(embeddings):
-            return model.forward_from_embeddings(embeddings, attention_mask, aux)
-    else:
-        input_ids, lens = forecaster.encode_context(context_text)
-        embedding_layer = model.emb
-        inverse_vocab = {index: token for token, index in forecaster.vocab.items()}
-        tokens = [inverse_vocab.get(i, "<unk>") for i in input_ids[0].tolist()]
-        baseline_ids = torch.full_like(input_ids, PAD)
-
-        def forward_fn(embeddings):
-            return model.forward_from_embeddings(embeddings, input_ids, lens, aux)
+    def forward_fn(embeddings):
+        return model.forward_from_embeddings(embeddings, input_ids, lens, aux)
 
     input_embeddings = embedding_layer(input_ids).detach()
     baseline_embeddings = embedding_layer(baseline_ids).detach()
@@ -342,10 +345,9 @@ def explain_forecaster(
 
     # Drop padding before display: the model sees it, but it explains nothing.
     scores = attributions.tolist()
-    if forecaster.architecture != "distilbert":
-        keep = [i for i, token_id in enumerate(input_ids[0].tolist()) if token_id != PAD]
-        tokens = [tokens[i] for i in keep]
-        scores = [scores[i] for i in keep]
+    keep = [i for i, token_id in enumerate(input_ids[0].tolist()) if token_id != PAD]
+    tokens = [tokens[i] for i in keep]
+    scores = [scores[i] for i in keep]
 
     word_attributions = aggregate_to_words(tokens, scores)
     normalised = list(
@@ -375,18 +377,27 @@ def _aux_contribution(
 ) -> Dict[str, object]:
     """How much of the forecast comes from the current-emotion feature vs the text.
 
-    Ablation: re-run with the aux feature set to the 'unknown / first turn'
+    Ablation: re-run with the aux feature set to the 'unknown current emotion'
     bucket the model was trained to handle, and report the change in the target
     probability.
+
+    Both runs are UNMASKED -- no transition constraint is applied to either --
+    so the comparison isolates the aux embedding rather than measuring the mask
+    twice. The numbers here therefore will not match the masked `confidence`
+    reported alongside the forecast, and that is deliberate.
     """
+    from config import FORECAST_CURRENT_EMOTIONS
+
     target_label = forecaster.labels[target_index]
     with_aux = forecaster._model_probabilities(context_text, aux_id)
     without_aux = forecaster._model_probabilities(context_text, UNKNOWN_AUX_ID)
     top_without = max(without_aux, key=without_aux.__getitem__)
     return {
         "current_emotion_feature": (
-            forecaster.labels[aux_id] if aux_id < len(forecaster.labels) else "unknown"
+            FORECAST_CURRENT_EMOTIONS[aux_id]
+            if aux_id < len(FORECAST_CURRENT_EMOTIONS) else "unknown"
         ),
+        "masked": False,
         "probability_with_feature": with_aux[target_label],
         "probability_without_feature": without_aux[target_label],
         "delta": with_aux[target_label] - without_aux[target_label],
@@ -396,7 +407,14 @@ def _aux_contribution(
 
 
 def counterfactual_current_emotion(forecaster, context_text: str) -> Dict[str, object]:
-    """Sweep the aux feature across all current emotions and summarise the spread."""
+    """Sweep the aux feature across all current emotions and summarise the spread.
+
+    On the next-state forecaster this is the most informative panel in the app.
+    The transition constraint means each assumed current emotion admits a
+    different set of next states, so the sweep shows the structure the model
+    actually encodes -- and, by contrast with the flat token attributions, how
+    little the sentence itself moves the answer.
+    """
     sweep = forecaster.counterfactual_by_current_emotion(context_text)
     if not sweep:
         return {"available": False, "reason": "no trained forecaster loaded"}
@@ -405,7 +423,11 @@ def counterfactual_current_emotion(forecaster, context_text: str) -> Dict[str, o
     return {
         "available": True,
         "sweep": {
-            emotion: {"label": result["label"], "confidence": result["confidence"]}
+            emotion: {
+                "label": result["label"],
+                "confidence": result["confidence"],
+                "trajectory": result.get("trajectory"),
+            }
             for emotion, result in sweep.items()
         },
         "distinct_outcomes": distinct,
@@ -415,21 +437,25 @@ def counterfactual_current_emotion(forecaster, context_text: str) -> Dict[str, o
             "classifier's output materially drives it."
             if len(distinct) > 1
             else "The forecast is the same under every assumed current emotion, "
-                 "so it is driven by the dialogue text alone."
+                 "so it is driven by the utterance text alone."
         ),
     }
 
 
 # ------------------------------------------------------------------ vocabulary
 def vocabulary_coverage(forecaster, context_text: str) -> Dict[str, object]:
-    """Which words the forecaster's 528-token vocabulary does not know.
+    """Which words the forecaster's word-level vocabulary does not know.
 
-    Not an attribution method, but the most important caveat for reading any
+    Not an attribution method, but a necessary caveat for reading any
     forecaster explanation: an out-of-vocabulary word contributes only the
     generic `<unk>` embedding, so its attribution says nothing about that word.
+    The retrained vocabulary is built from the training split of a ~10k-row
+    corpus of real DailyDialog-style sentences, far broader than the 528-token
+    synthetic vocabulary the previous forecaster shipped with, so OOV rates on
+    ordinary chat input are much lower than they used to be.
     """
-    if forecaster.architecture == "distilbert" or not forecaster.vocab:
-        return {"available": False, "reason": "subword tokenizer has no OOV words"}
+    if not forecaster.vocab:
+        return {"available": False, "reason": "no word-level vocabulary loaded"}
     tokens = simple_tokenize(context_text)
     unknown = [token for token in tokens if token not in forecaster.vocab]
     return {

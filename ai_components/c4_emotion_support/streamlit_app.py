@@ -32,6 +32,7 @@ from config import (
     DEFAULT_FORECASTER,
     EMOTION_LABELS,
     FORECAST_LABELS,
+    FORECASTER_CAVEAT,
     FORECASTER_METRICS,
     LLM_ADAPTER_PATH,
     LLM_BASE_MODEL,
@@ -219,7 +220,7 @@ def _counterfactual_heatmap(sweep: Dict[str, Dict[str, object]]) -> go.Figure:
         title="Forecast distribution under each assumed current emotion",
         height=80 + 36 * len(rows),
         margin=dict(l=10, r=10, t=44, b=10),
-        xaxis=dict(title="forecast next emotion", side="bottom"),
+        xaxis=dict(title="forecast next state", side="bottom"),
         yaxis=dict(title="assumed current emotion", autorange="reversed"),
         font=dict(color=MUTED),
     )
@@ -285,7 +286,8 @@ with st.sidebar:
         "Forecaster checkpoint",
         AVAILABLE_FORECASTERS,
         index=AVAILABLE_FORECASTERS.index(DEFAULT_FORECASTER),
-        help="All three were trained by forcasting/train_deep.py on the same splits.",
+        help="All four were trained by emotion_forecasting_pipeline/"
+             "train_models_torch.py on the same splits.",
     )
     force_fallback_forecaster = st.toggle("Force rule-based forecaster", value=False)
 
@@ -295,7 +297,7 @@ with st.sidebar:
         help="Off falls back to the fixed strategy templates, which needs no GPU.",
     )
     show_xai = st.toggle("Compute explanations (XAI)", value=True,
-                         help="Integrated Gradients costs ~32 forward passes per model.")
+                         help="Integrated Gradients costs ~64 forward passes per model.")
     show_trace = st.toggle("Show JSON trace", value=False)
 
     voice_mode = st.toggle(
@@ -357,17 +359,29 @@ with st.sidebar:
         st.caption(str(forecaster.load_error))
     else:
         metrics = FORECASTER_METRICS.get(forecaster.architecture, {})
-        st.success(f"Forecaster: {forecaster.architecture} on {forecaster.device}")
+        st.success(f"State forecaster: {forecaster.architecture} on {forecaster.device}")
         st.caption(
             f"test acc {metrics.get('test_accuracy', float('nan')):.4f} · "
             f"macro-F1 {metrics.get('test_macro_f1', float('nan')):.4f} · "
-            f"{len(forecaster.labels)} classes"
+            f"ROC-AUC {metrics.get('test_roc_auc', float('nan')):.4f} · "
+            f"{len(forecaster.labels)} next-state classes"
         )
-        persistence = FORECASTER_METRICS["baseline_persistence"]["test_macro_f1"]
-        if metrics.get("test_macro_f1", 0) < persistence:
-            st.info(
-                f"Persistence baseline still leads at macro-F1 {persistence:.4f}. "
-                "Reported as-measured."
+        # The prior baseline reads no text at all. If it matches the model on
+        # accuracy the demo has to say so, in the place a viewer is looking.
+        prior = FORECASTER_METRICS["baseline_prior_by_current_emotion"]
+        if metrics.get("test_accuracy", 0) <= prior["test_accuracy"] + 0.02:
+            st.warning(
+                f"A text-free prior (transition rules + training base rates) "
+                f"scores acc {prior['test_accuracy']:.4f}, matching this model. "
+                f"The macro-F1 gain ({metrics.get('test_macro_f1', 0):.4f} vs "
+                f"{prior['test_macro_f1']:.4f}) comes from spreading predictions "
+                f"across the reachable states, not from reading the sentence."
+            )
+        st.caption(FORECASTER_CAVEAT)
+        if forecaster.constrain_transitions:
+            st.caption(
+                "Transition mask ON: states unreachable from the current "
+                "emotion are given zero probability."
             )
 
     if not use_llm:
@@ -594,12 +608,17 @@ col2.metric("Previous emotion", str(last_trace["previous_emotion"] or "—"))
 col3.metric("Deviation",
             f"{last_trace['deviation_level']}",
             f"score {last_trace['deviation_score']:.2f}", delta_color="off")
-col4.metric("Forecast next emotion", last_trace["forecasted_next_emotion"],
+col4.metric("Forecast next state", last_trace["forecasted_next_emotion"],
             f"{last_trace['forecast_confidence']:.1%} confidence")
 
 col5, col6, col7, col8 = st.columns(4)
 col5.metric("Selected strategy", last_trace["selected_strategy"])
-col6.metric("Forecast source", last_trace["forecast_source"])
+col6.metric(
+    "Trajectory",
+    last_trace.get("forecast_trajectory", "—"),
+    "deteriorating" if last_trace.get("forecast_deteriorating") else "not deteriorating",
+    delta_color="inverse" if last_trace.get("forecast_deteriorating") else "off",
+)
 col7.metric("Safety", "risk flagged" if last_trace["safety"]["risk_detected"] else "clear")
 col8.metric("Reply route", _ROUTE_LABELS.get(last_trace.get("reply_route", "template"),
                                              last_trace.get("reply_route", "—")))
@@ -627,11 +646,44 @@ with tab_dist:
             _probability_bars(
                 last_trace["forecast_probabilities"] or {}, FORECAST_LABELS,
                 last_trace["forecasted_next_emotion"],
-                f"Next emotion — forecaster ({last_trace['forecast_source']}, 8 classes)",
+                f"Next state — forecaster ({last_trace['forecast_source']}, 13 classes)",
                 "#f6c3ac", ORANGE,
             ),
             use_container_width=True,
         )
+        if last_trace.get("forecast_constrained"):
+            st.caption(
+                "Bars at zero are states the transition rules make unreachable "
+                f"from `{last_trace['current_emotion']}`. Reachable: "
+                + ", ".join(f"`{s}`" for s in last_trace.get("forecast_reachable_states", []))
+            )
+
+    st.markdown("**Where this is heading**")
+    st.caption(explanations.get("forecast_state_note", ""))
+    trajectory_probabilities = last_trace.get("forecast_trajectory_probabilities") or {}
+    intensity = last_trace.get("forecast_intensity_probabilities") or {}
+    if trajectory_probabilities:
+        traj_left, traj_right = st.columns(2)
+        with traj_left:
+            st.dataframe(
+                pd.DataFrame(
+                    [{"trajectory": k, "probability": v}
+                     for k, v in trajectory_probabilities.items() if v > 0]
+                ).sort_values("probability", ascending=False),
+                hide_index=True, use_container_width=True,
+                column_config={"probability": st.column_config.ProgressColumn(
+                    "probability", min_value=0.0, max_value=1.0, format="%.3f")},
+            )
+        with traj_right:
+            st.dataframe(
+                pd.DataFrame(
+                    [{"next intensity": k, "probability": v}
+                     for k, v in intensity.items() if v > 0]
+                ).sort_values("probability", ascending=False),
+                hide_index=True, use_container_width=True,
+                column_config={"probability": st.column_config.ProgressColumn(
+                    "probability", min_value=0.0, max_value=1.0, format="%.3f")},
+            )
 
     st.markdown("**Forecast projected onto the classifier's 5 labels**")
     st.caption(explanations.get("label_mapping_note", ""))
@@ -648,8 +700,14 @@ with tab_dist:
         )
     if explanations.get("label_mapping_lossy"):
         st.warning(
-            "This projection is lossy: the 8-label forecast distinguishes states "
-            "the 5-label classifier cannot represent."
+            "This projection is lossy: the forecast distinguishes states the "
+            "5-label classifier cannot represent."
+        )
+    else:
+        st.caption(
+            "Not lossy: every next-state maps exactly onto one classifier "
+            "emotion. The intensity is dropped by this projection and shown "
+            "in the trajectory table above rather than lost."
         )
 
 # ----------------------------------------------------------------- reply generation
@@ -815,9 +873,10 @@ with tab_xai:
             st.info(forecaster_xai.get("reason", "No forecaster explanation available."))
         else:
             st.caption(
-                f"Model input (dialogue context, {forecaster.context_turns} previous turns):"
+                "Model input (this utterance only — the corpus's dialogue-context "
+                "column is target-derived and excluded as leakage):"
             )
-            st.code(last_trace["forecast_context_text"], language=None)
+            st.code(last_trace["forecast_input_text"], language=None)
             st.markdown(
                 _highlighted_text(forecaster_xai["token_attributions"]),
                 unsafe_allow_html=True,
@@ -864,7 +923,7 @@ with tab_xai:
             st.plotly_chart(
                 _counterfactual_heatmap(
                     forecaster.counterfactual_by_current_emotion(
-                        last_trace["forecast_context_text"]
+                        last_trace["forecast_input_text"]
                     )
                 ),
                 use_container_width=True,

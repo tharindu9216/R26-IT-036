@@ -4,16 +4,23 @@
 when the forecaster was a scikit-learn classifier over a 15-float one-hot
 feature vector saved to `forecaster.joblib`.
 
-That design is gone. The forecaster is now a neural model over dialogue-context
-text, trained in `../../../../forcasting/`:
+That design is gone twice over. The forecaster is now a neural model that
+predicts the next emotional **state**, trained in
+`../../../../emotion_forecasting_pipeline/`:
 
-| Then (this folder) | Now (`forcasting/`) |
+| Then (this folder) | Now (`emotion_forecasting_pipeline/`) |
 |---|---|
-| 7 labels (`neutral, joy, sadness, anger, fear, surprise, disgust`) | 8 labels (`angry, anxious, calm, excited, happy, neutral, sad, stressed`) |
-| 15-float one-hot of current/previous emotion + deviation | previous 3 dialogue turns as text + current emotion as an aux embedding |
-| sklearn `GradientBoosting` / `RandomForest` / `LogReg` → `forecaster.joblib` | TextCNN / BiLSTM-attention / DistilBERT → `*_forecast.pt` |
-| random row splits | `GroupShuffleSplit` on `conversation_id` (no conversation crosses splits) |
-| no baselines | majority + persistence baselines logged before any model runs |
+| 7 emotion labels (`neutral, joy, sadness, anger, fear, surprise, disgust`) | 13 **state** labels (`neutral`, `joy`/`sadness`/`anger`/`fear`, `low_*`/`high_*`) |
+| 15-float one-hot of current/previous emotion + deviation | the current utterance as text + the current emotion as an aux embedding |
+| sklearn `GradientBoosting` / `RandomForest` / `LogReg` → `forecaster.joblib` | TextCNN / BiLSTM / BiGRU / CNN-BiLSTM → `*_state_forecast.pt`, plus TF-IDF LogReg / LinearSVM |
+| random row splits | stratified splits on the target state |
+| no baselines | majority + prior-by-current-emotion baselines logged before any model runs |
+| — | `context_text` excluded as leakage (it predicts the target at 1.0000 accuracy) |
+
+The intermediate design — an 8-label next-*emotion* model over 3 turns of
+dialogue context, trained in `../../../../forcasting/` — is also superseded.
+Its checkpoints are parked in
+`../models/next_emotion_forecaster/archive_8label/`.
 
 Neither script runs against the current code: they call
 `EmotionForecaster._build_features()`, which no longer exists, and

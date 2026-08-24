@@ -1,13 +1,15 @@
 """End-to-end C4 turn: classify -> track deviation -> forecast -> select -> respond.
 
-Adds two things over the original prototype:
+Stage 4 forecasts a next emotional *state* rather than a next emotion label.
+`high_sadness` and `low_sadness` are the same emotion and opposite situations,
+so the trace carries the decomposition -- base emotion, intensity, trajectory --
+and the strategy rules read the trajectory. See `c4_pipeline/label_mapping.py`.
 
-* the forecaster now receives the real dialogue context it was trained on, and
-  the classifier's label is projected into the forecaster's vocabulary before
-  being used as the auxiliary current-emotion feature;
-* every stage attaches an explanation, collected under `trace["explanations"]`.
+The classifier's label needs no projection to reach the forecaster: both models
+work in the same five current-emotion labels, which is what the retrain bought.
+Every stage attaches an explanation, collected under `trace["explanations"]`.
 
-XAI is opt-in per call (`explain=`) because Integrated Gradients costs ~32
+XAI is opt-in per call (`explain=`) because Integrated Gradients costs ~64
 forward passes per model and the chat should stay responsive when the panel is
 collapsed.
 """
@@ -26,9 +28,12 @@ from .emotion_classifier import EmotionClassifier
 from .emotion_forecaster import EmotionForecaster
 from .label_mapping import (
     describe_mapping,
+    describe_state,
     forecast_to_classifier_label,
+    intensity_probabilities,
     is_lossy,
     project_probabilities,
+    trajectory_probabilities,
 )
 from .reply_graph import generate_supportive_reply
 from .response_generator import generate_response
@@ -97,7 +102,11 @@ def run_c4_pipeline(
     )
     deviation = compute_deviation(previous_emotion, current_output.label)
 
-    # 4. next-turn forecast -------------------------------------------------
+    # 4. next-turn state forecast -------------------------------------------
+    # `dialogue_history` is passed for interface continuity only; the retrained
+    # forecaster reads the current utterance plus the current emotion, because
+    # the corpus's dialogue-context column is target-derived (see the
+    # forecaster's module docstring).
     history_emotions = [item["emotion"] for item in conversation_state["emotion_history"]]
     forecast_output = forecaster.predict(
         current_emotion=current_output.label,
@@ -158,10 +167,11 @@ def run_c4_pipeline(
         "strategy_rules": strategy["rule_trace"],
         "label_mapping_note": describe_mapping(forecast_label),
         "label_mapping_lossy": is_lossy(forecast_projected, forecast_label),
+        "forecast_state_note": describe_state(forecast_label, current_output.label),
     }
     if explain:
         explanations["classifier"] = xai.explain_classifier(classifier, user_message)
-        context_text = forecast_output.get("context_text") or ""
+        context_text = forecast_output.get("input_text") or ""
         if context_text:
             explanations["forecaster"] = xai.explain_forecaster(
                 forecaster, context_text, int(forecast_output.get("aux_emotion_id", 0))
@@ -187,15 +197,30 @@ def run_c4_pipeline(
         "previous_emotion": deviation["previous_emotion"],
         "deviation_score": deviation["deviation_score"],
         "deviation_level": deviation["deviation_level"],
+        # `forecasted_next_emotion` holds the next-emotion STATE (e.g.
+        # "high_sadness"). The key name is unchanged so existing readers of the
+        # trace keep working; the decomposition sits alongside it.
         "forecasted_next_emotion": forecast_label,
         "forecasted_next_emotion_projected": forecast_projected,
+        "forecast_base_emotion": forecast_output.get("base_emotion"),
+        "forecast_intensity": forecast_output.get("intensity"),
+        "forecast_trajectory": forecast_output.get("trajectory"),
+        "forecast_deteriorating": forecast_output.get("deteriorating"),
         "forecast_confidence": forecast_output["confidence"],
         "forecast_probabilities": forecast_output.get("probabilities"),
         "forecast_probabilities_projected": project_probabilities(
             forecast_output.get("probabilities") or {}
         ),
+        "forecast_intensity_probabilities": intensity_probabilities(
+            forecast_output.get("probabilities") or {}
+        ),
+        "forecast_trajectory_probabilities": trajectory_probabilities(
+            current_output.label, forecast_output.get("probabilities") or {}
+        ),
+        "forecast_reachable_states": forecast_output.get("reachable_states", []),
+        "forecast_constrained": forecast_output.get("constrained", False),
         "forecast_source": forecast_output.get("source", "rule"),
-        "forecast_context_text": forecast_output.get("context_text", ""),
+        "forecast_input_text": forecast_output.get("input_text", ""),
         "forecast_unk_rate": forecast_output.get("unk_rate", 0.0),
         "forecast_aux_emotion": forecast_output.get("aux_emotion_label"),
         "selected_strategy": strategy["strategy"],
@@ -228,6 +253,7 @@ def run_c4_pipeline(
             "deviation_score": deviation["deviation_score"],
             "strategy": strategy["strategy"],
             "forecasted_emotion": forecast_label,
+            "forecast_trajectory": forecast_output.get("trajectory"),
             "forecast_confidence": forecast_output["confidence"],
         }
     )

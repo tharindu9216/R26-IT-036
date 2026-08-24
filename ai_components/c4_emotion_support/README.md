@@ -8,17 +8,18 @@ trained for this component and instrumented with Explainable AI at every stage.
 | Stage | Status | Detail |
 |---|---|---|
 | Current emotion classifier — train & evaluate | **Done** | `../../../classification/`, 4 models + 2 baselines compared under Optuna |
-| Next-turn emotion forecaster — train & evaluate | **Done** | `../../../forcasting/`, 5 models + 2 baselines, 30 Optuna trials each |
+| Next-emotion-**state** forecaster — train & evaluate | **Done** | `../../../emotion_forecasting_pipeline/`, 6 models + 2 baselines |
 | Classifier integrated into the demo | **Done** | RoBERTa checkpoint loads and runs on GPU |
-| Forecaster integrated into the demo | **Done** | TextCNN / BiLSTM / DistilBERT selectable in the sidebar |
+| Forecaster integrated into the demo | **Done** | TextCNN / BiLSTM / BiGRU / CNN-BiLSTM selectable in the sidebar |
+| Forecast drives the strategy rules | **Done** | rules read the trajectory (escalating vs easing), not just the emotion |
 | Deviation tracking, strategy selection, safety, templates | **Done** | rule-based, fully inspectable |
 | Explainable AI | **Done** | Integrated Gradients, occlusion, counterfactual probing, rule traces |
 | Reply generation — LangGraph orchestration | **Done** | `c4_pipeline/reply_graph.py`, routing + guard + retry |
 | Reply generation — Qwen3-4B wiring | **Done** | 4-bit NF4 on the 3080, 1.4–4.3 s per reply, verified live |
 | ESConv LoRA adapter trained | **Done** | eval loss 2.091, perplexity 8.094, 126 MB, peak 5.46 GB |
 | End-to-end verification | **Done** | `smoke_test.py --all` and `--llm` — all checks pass |
-| Forecaster beating the persistence baseline | **Open** | best trained macro-F1 0.7025 vs baseline 0.7098 |
-| Real-corpus forecaster (MELD / EmpatheticDialogues) | **Open** | current forecaster is trained on a synthetic corpus |
+| Forecaster beating a text-free prior on accuracy | **Open** | no model does; see the measurement below — it is a label problem, not a model problem |
+| Real-corpus forecast labels (MELD / EmpatheticDialogues) | **Open** | the blocker: `next_emotion_state` is synthetic and not conditioned on the utterance |
 | Adapter reply length calibration | **Open** | adapter averages 12.0 words vs ESConv's 18.9 — see below |
 
 ## The two models
@@ -42,46 +43,106 @@ modelling result. It is reported as measured rather than dropped.
 
 **Labels (5):** `neutral, anger, fear, joy, sadness`
 
-### Next emotion forecaster — TextCNN / BiLSTM / DistilBERT
+### Next emotion **state** forecaster — TextCNN / BiLSTM / BiGRU / CNN-BiLSTM
 
-Trained in `../../../forcasting/` on a synthetic conversational corpus with
-conversation-level splits. Each model gets the previous 3 dialogue turns plus
-the speaker's current emotion as an auxiliary feature.
-
-| Model | Test accuracy | Test macro-F1 |
-|---|---|---|
-| baseline_persistence | 0.7270 | **0.7098** |
-| distilbert | 0.7177 | 0.7025 |
-| **textcnn** (demo default) | 0.7217 | 0.7003 |
-| bilstm | 0.7164 | 0.6903 |
-| tfidf + LightGBM | 0.7190 | 0.6791 |
-| tfidf + LogReg | 0.6911 | 0.6570 |
-| baseline_majority | 0.2437 | 0.0490 |
-
-**No trained model beats persistence yet**, and the demo says so in the sidebar.
-Emotion has strong inertia, so "they will feel the same next turn" is a hard
-bar. TextCNN is the default because it is within 0.002 macro-F1 of DistilBERT at
-1/450th the file size and needs no base model download.
-
-**Labels (8):** `angry, anxious, calm, excited, happy, neutral, sad, stressed`
-
-### The label spaces do not match
-
-The two models were trained on different corpora with different label sets, so
-`c4_pipeline/label_mapping.py` bridges them:
+Retrained in `../../../emotion_forecasting_pipeline/`. The previous forecaster
+predicted which *emotion* came next; this one predicts the next emotional
+**state** — the emotion together with where its intensity is going.
 
 ```
-classifier -> forecaster (aux feature)   forecaster -> classifier (strategy rules)
-  neutral -> neutral                       angry, -> anger
-  anger   -> angry                         anxious, stressed -> fear
-  fear    -> anxious                       calm, neutral -> neutral
-  joy     -> happy                         excited, happy -> joy
-  sadness -> sad                           sad -> sadness
+neutral
+joy | sadness | anger | fear        onset   (only reachable from neutral)
+low_X | high_X                      the emotion persists, intensity moves
 ```
 
-Both directions are lossy — `fear` covers both `anxious` and `stressed` — and
-the UI flags a projection when it merges states the 5-label space cannot
-represent. It is not hidden.
+That distinction is the point. `low_sadness` and `high_sadness` are the same
+emotion and opposite situations: one is distress that is lifting, the other is
+distress that is deepening. A bare emotion label cannot tell a support system
+which of those it is looking at, so `Comfort` and `Encourage` used to fire on
+essentially the same evidence.
+
+**Model input:** the current utterance + the current emotion. Nothing else.
+
+**Labels (13):** `neutral`, `joy`/`sadness`/`anger`/`fear`,
+`low_*`/`high_*` for each of those four.
+
+#### Results — read the caveat before quoting these
+
+1501 held-out rows, 13 classes.
+
+| Model | Test accuracy | Test macro-F1 | ROC-AUC (OvR) |
+|---|---|---|---|
+| linear_svm (TF-IDF) | **0.3578** | **0.3381** | 0.9006 |
+| **bigru** (demo default) | 0.3538 | 0.3295 | 0.8989 |
+| logistic_regression (TF-IDF) | 0.3538 | 0.3281 | 0.9011 |
+| bilstm | 0.3411 | 0.3137 | 0.8996 |
+| cnn_bilstm | 0.3418 | 0.3131 | 0.8983 |
+| textcnn | 0.3444 | 0.3013 | 0.9009 |
+| baseline_prior_by_current_emotion | 0.3438 | 0.1757 | — |
+| baseline_majority | 0.2432 | 0.0301 | — |
+
+`baseline_prior_by_current_emotion` reads **no text at all** — it applies the
+corpus transition rules plus the training base rates. It scores 0.3438, which
+is inside a percentage point of every trained model. The models beat it on
+macro-F1 (0.30–0.34 vs 0.18) only because balanced class weights spread
+predictions across the reachable states instead of collapsing onto the majority
+one.
+
+**Why:** the `next_emotion_state` labels are synthetic and were not conditioned
+on the utterance. Measured directly — within every current-emotion group a
+TF-IDF model on the text alone scores at or below the majority baseline (0.335
+vs 0.372 for intensity). The one column that *does* predict the target is
+`context_text`, at **1.0000** test accuracy; it was generated from the target
+and the pipeline excludes it as leakage.
+
+ROC-AUC ≈ 0.90 next to accuracy ≈ 0.35 is the signature of exactly this: the
+ranking cleanly separates the 3 reachable states from the 10 unreachable ones,
+and is near chance within the reachable set.
+
+**So what the forecaster is:** a reliable model of which next states are
+possible and how often each occurs. It is not, on this data, a model that reads
+a sentence and tells you distress is about to escalate. Replacing the labels
+with observed sequential annotations is what changes that — not a bigger model.
+The sidebar says all of this in the app.
+
+#### The transition constraint
+
+The corpus transition rules are deterministic, so the demo masks unreachable
+states out of the distribution rather than hoping the model learned them:
+
+```
+neutral -> neutral | joy | sadness | anger | fear
+sadness -> neutral | low_sadness | high_sadness
+anger   -> neutral | low_anger   | high_anger
+fear    -> neutral | low_fear    | high_fear
+joy     -> neutral | low_joy     | high_joy
+```
+
+The pipeline can therefore never be handed `high_joy` for a user who is
+currently sad. `smoke_test.py` asserts it. Toggle with
+`FORECAST_CONSTRAIN_TRANSITIONS` in `config.py`; the reported metrics above are
+unmasked.
+
+### The label spaces now line up
+
+The retrain removed the old 5 ↔ 8 projection. The forecaster conditions on the
+current emotion in the **classifier's own five labels**, so the input side is
+the identity, and `label_mapping.assert_label_spaces_aligned()` fails loudly at
+import if that ever stops being true.
+
+The output side decomposes exactly:
+
+```
+next state       base emotion   intensity   trajectory (with current emotion)
+high_sadness  -> sadness        high        escalating
+low_sadness   -> sadness        low         easing
+neutral       -> neutral        —           resolving / steady
+fear          -> fear           —           onset
+```
+
+Nothing is merged, so nothing is lost: the projection to 5 labels drops the
+intensity, and the intensity is shown alongside rather than discarded. The
+trajectory is what the strategy rules read — see `c4_pipeline/strategy_selector.py`.
 
 ### Reply generation — Qwen3-4B + ESConv LoRA
 
@@ -152,7 +213,7 @@ everything else on a 12 GB card.
 it runs templates. Both states are reported in the sidebar rather than hidden.
 
 Measured on the RTX 3080 (4-bit): 1.3–3.7 s per reply at 11–25 generated tokens,
-~3.2 GB VRAM resident alongside RoBERTa and the TextCNN forecaster.
+~3.2 GB VRAM resident alongside RoBERTa and the BiGRU forecaster.
 
 ### What the adapter actually changed
 
@@ -193,8 +254,8 @@ dependency.
 | **Integrated Gradients** | classifier + forecaster | which tokens pushed the prediction, and how hard |
 | **Occlusion** (leave-one-out) | classifier | the same question without trusting gradients — a cross-check |
 | **Aux-feature ablation** | forecaster | how much of the forecast is the text vs the classifier's output |
-| **Counterfactual sweep** | forecaster | what the forecast would be under each of the 8 possible current emotions |
-| **Vocabulary coverage** | forecaster | which words fell outside the 528-token training vocabulary |
+| **Counterfactual sweep** | forecaster | what the forecast would be under each of the 5 possible current emotions |
+| **Vocabulary coverage** | forecaster | which words fell outside the 4,718-token training vocabulary |
 | **Rule trace** | strategy selector | every rule, whether it fired, and which ones were reached |
 
 Two details worth knowing when reading the output:
@@ -204,10 +265,18 @@ Two details worth knowing when reading the output:
   15% the explainer automatically retries at double the step count. At the
   original 32 steps some turns reached a 30% gap — attributions that look
   plausible and are wrong.
-- **The forecaster's vocabulary is only 528 tokens**, because its training
-  corpus is template-generated. Free-text input hits `<unk>` often, and an
-  attribution on an unknown token describes the unknown-token embedding, not the
-  word. The UI warns with the exact OOV list.
+- **The forecaster's vocabulary is 4,718 tokens**, built from the training
+  split of a ~10k-row corpus of real DailyDialog-style sentences. Free-text
+  input still hits `<unk>` sometimes, and an attribution on an unknown token
+  describes the unknown-token embedding, not the word. The UI warns with the
+  exact OOV list. (The previous forecaster had 528 tokens and hit `<unk>`
+  constantly, so this is much improved rather than solved.)
+- **Read the forecaster's token attributions with the label caveat in mind.**
+  On this corpus the utterance does not separate the reachable next states, so
+  a large attribution marks a token the model *reacts to*, not evidence that
+  the token predicts escalation. The aux-feature ablation is the honest
+  comparison: removing the current emotion typically moves the forecast far
+  more than any word does.
 
 ## Structure
 
@@ -220,8 +289,8 @@ c4_emotion_support/
 │   ├── pipeline.py              the full turn
 │   ├── emotion_classifier.py    RoBERTa wrapper + keyword fallback
 │   ├── emotion_forecaster.py    .pt checkpoint wrapper + persistence fallback
-│   ├── forecast_models.py       architectures mirrored from forcasting/train_deep.py
-│   ├── label_mapping.py         5 <-> 8 label bridge
+│   ├── forecast_models.py       GENERATED by emotion_forecasting_pipeline/export_to_c4.py
+│   ├── label_mapping.py         state -> (emotion, intensity, trajectory) decomposition
 │   ├── xai.py                   IG, occlusion, counterfactuals, vocab coverage
 │   ├── deviation_tracker.py     turn-to-turn emotion deviation
 │   ├── strategy_selector.py     rules + evaluation trace
@@ -282,7 +351,7 @@ Measured VRAM for the full stack, on the demo's default settings:
 | Stage | VRAM |
 |---|---|
 | RoBERTa classifier | 0.47 GB |
-| TextCNN forecaster | negligible |
+| BiGRU state forecaster | negligible (1.5 MB) |
 | Qwen3-4B, 4-bit NF4 | 2.50 GB |
 | **Peak during generation** | **3.05 GB allocated / 3.12 GB reserved** |
 
@@ -459,9 +528,11 @@ I feel a little better after talking.
 ```
 
 and each turn reports the current emotion with its full distribution, the
-deviation from the previous turn, the forecast next emotion in both label
-spaces, the selected strategy with the rule trace behind it, the supportive
-response, per-token explanations for both models, and the full JSON trace.
+deviation from the previous turn, the forecast next **state** with its
+trajectory (escalating / easing / resolving / onset / steady) and its
+projection onto the 5 classifier labels, the selected strategy with the rule
+trace behind it, the supportive response, per-token explanations for both
+models, and the full JSON trace.
 
 ## Research disclaimer
 

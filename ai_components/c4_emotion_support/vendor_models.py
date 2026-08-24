@@ -11,10 +11,14 @@ machines anyway.
 The result is a directory `from_pretrained()` accepts directly, so a machine
 with `models/` populated needs no Hugging Face download and no network at all.
 
-    python vendor_models.py                  # Qwen3-4B + DistilBERT
-    python vendor_models.py --skip-distilbert
+    python vendor_models.py                  # Qwen3-4B
     python vendor_models.py --voice          # + Whisper and Kokoro for voice mode
     python vendor_models.py --list           # show what is vendored already
+
+The next-emotion-state forecaster is not listed here: its checkpoints are a few
+megabytes each, they live in the repository under
+`models/next_emotion_forecaster/`, and they are produced by
+`emotion_forecasting_pipeline/export_to_c4.py` rather than downloaded.
 
 Run it from this directory, after the models are in your Hugging Face cache
 (they are, if the demo has run once).
@@ -28,7 +32,6 @@ import urllib.request
 from pathlib import Path
 
 from config import (
-    DISTILBERT_BASE,
     KOKORO_DIR,
     KOKORO_VOICES_FILE,
     LLM_BASE_MODEL,
@@ -39,7 +42,6 @@ from config import (
 # (hub repo id, destination folder under models/, why it is needed)
 TARGETS = [
     (LLM_BASE_MODEL, "qwen3-4b-instruct", "reply generation (required)"),
-    (DISTILBERT_BASE, "distilbert-base-uncased", "distilbert forecaster (optional)"),
 ]
 
 # Voice mode's two models, neither of which lives where the others do.
@@ -79,8 +81,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument("--skip-distilbert", action="store_true",
-                        help="skip the 130 MB forecaster base model")
     parser.add_argument("--voice", action="store_true",
                         help="also vendor the Whisper and Kokoro voice models")
     parser.add_argument("--list", action="store_true",
@@ -208,7 +208,7 @@ def main() -> None:
     args = parse_args()
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-    targets = TARGETS[:1] if args.skip_distilbert else TARGETS
+    targets = TARGETS
 
     if args.list:
         print(f"Vendored models in {MODELS_DIR}:\n")

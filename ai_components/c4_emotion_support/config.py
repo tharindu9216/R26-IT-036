@@ -1,16 +1,28 @@
 """Configuration for the C4 demo.
 
-Two separately trained models are wired into this demo and they do NOT share a
-label space:
+Two separately trained models are wired into this demo:
 
 * the current-emotion classifier (RoBERTa, DailyDialog-derived) predicts 5 labels
-* the next-emotion forecaster (TextCNN / BiLSTM / DistilBERT, conversational
-  corpus) predicts 8 labels
+* the next-emotion-STATE forecaster (TextCNN / BiLSTM / BiGRU / CNN-BiLSTM,
+  trained by ../../../emotion_forecasting_pipeline) predicts 13 labels
 
-`c4_pipeline/label_mapping.py` bridges the two. Everything downstream of the
-classifier (deviation tracking, strategy selection) works in the 5-label
-CLASSIFIER space; the forecaster's native 8 labels are shown as-is for detail
-and projected down when a strategy has to be picked.
+The forecaster used to predict a bare next *emotion* in its own 8-label
+vocabulary, which meant two things had to be papered over: it answered a
+different question from the one the product asks, and its labels had to be
+projected onto the classifier's through a lossy 8 -> 5 mapping.
+
+The retrained model answers the product's actual question -- what state does
+this emotion move to next -- over 13 `next_emotion_state` classes:
+
+    neutral
+    joy / sadness / anger / fear          (onset, only reachable from neutral)
+    low_X / high_X for each of the four   (the emotion persists, intensity moves)
+
+and it takes the current emotion in the classifier's own five labels, so the
+input-side projection is now the identity. `c4_pipeline/label_mapping.py`
+decomposes a state into (base emotion, intensity, trajectory); downstream
+stages keep working in the 5-label CLASSIFIER space via the base emotion, and
+the trajectory is the new signal the strategy rules use.
 """
 
 import os
@@ -32,24 +44,63 @@ EMOTION_LABELS = [
     "sadness",   # 4
 ]
 
-# Next-emotion forecaster (id order must match artifacts/meta_forecast.json).
+# Next-emotion-STATE forecaster. The id order must match
+# `label_classes.json` / `meta_forecast.json`, which preprocess.py writes as
+# `sorted(unique(next_emotion_state))` -- so it is alphabetical, not grouped.
+# Do not "tidy" this into a nicer order without retraining.
 FORECAST_LABELS = [
-    "angry",     # 0
-    "anxious",   # 1
-    "calm",      # 2
-    "excited",   # 3
-    "happy",     # 4
-    "neutral",   # 5
-    "sad",       # 6
-    "stressed",  # 7
+    "anger",         # 0   onset from neutral
+    "fear",          # 1   onset from neutral
+    "high_anger",    # 2
+    "high_fear",     # 3
+    "high_joy",      # 4
+    "high_sadness",  # 5
+    "joy",           # 6   onset from neutral
+    "low_anger",     # 7
+    "low_fear",      # 8
+    "low_joy",       # 9
+    "low_sadness",   # 10
+    "neutral",       # 11
+    "sadness",       # 12  onset from neutral
 ]
 
+# The current emotion the forecaster conditions on. Identical to EMOTION_LABELS
+# by construction -- that is the point of the retrain, and label_mapping.py
+# asserts it rather than trusting it.
+FORECAST_CURRENT_EMOTIONS = ["neutral", "anger", "fear", "joy", "sadness"]
+
+# Transition rules of the training corpus (preprocess.validate_transition).
+# Deterministic, so the forecaster masks everything outside the reachable set
+# instead of hoping the model learned it.
+FORECAST_TRANSITIONS = {
+    "neutral": ["neutral", "joy", "sadness", "anger", "fear"],
+    "anger":   ["neutral", "low_anger", "high_anger"],
+    "fear":    ["neutral", "low_fear", "high_fear"],
+    "joy":     ["neutral", "low_joy", "high_joy"],
+    "sadness": ["neutral", "low_sadness", "high_sadness"],
+}
+
 # ----------------------------------------------------------------- forecaster
-# Which checkpoint the forecaster loads by default. "textcnn" is the demo
-# default: 0.6 MB, no external base model to download, and its test macro-F1
-# (0.7003) is within noise of DistilBERT's (0.7025) at ~450x the file size.
-DEFAULT_FORECASTER = "textcnn"
-AVAILABLE_FORECASTERS = ["textcnn", "bilstm", "distilbert"]
+# Which checkpoint the forecaster loads by default. All four are small enough to
+# keep in the repository, so the choice is about accuracy, not size: bigru wins
+# the neural leaderboard on test macro-F1 (0.3295) at the smallest footprint
+# (1.5 MB). See FORECASTER_METRICS at the bottom of this file, and read the
+# note there before quoting any of these numbers as a result.
+DEFAULT_FORECASTER = "bigru"
+AVAILABLE_FORECASTERS = ["textcnn", "bilstm", "bigru", "cnn_bilstm"]
+
+# The DistilBERT forecaster is gone. It existed to squeeze signal out of the old
+# free-text dialogue context; the retrained model reads one utterance plus the
+# current emotion, where a 265 MB subword encoder bought nothing measurable.
+# `distilbert-base-uncased` is therefore no longer a dependency of this demo.
+
+# Apply the corpus transition rules as a hard mask over the forecast
+# distribution. The rules are deterministic, so a state outside the reachable
+# set is not an unlikely prediction, it is an invalid one -- masking guarantees
+# the pipeline can never be handed "high_joy" for a user who is currently sad.
+# Set False to see the unmasked head, which is what the reported test metrics
+# measure.
+FORECAST_CONSTRAIN_TRANSITIONS = True
 
 
 def _vendored_or_hub(folder: str, repo_id: str) -> str:
@@ -65,18 +116,17 @@ def _vendored_or_hub(folder: str, repo_id: str) -> str:
     return repo_id
 
 
-DISTILBERT_BASE = _vendored_or_hub("distilbert-base-uncased", "distilbert-base-uncased")
-
-# Number of previous dialogue turns concatenated into the forecaster's input.
-# Must match `--context` used in preprocess.py (meta_forecast.json records it).
-FORECAST_CONTEXT_TURNS = 3
-
 # ----------------------------------------------------------------- deviation
-# Valence groups spanning BOTH label spaces so deviation tracking works on
-# either vocabulary.
-POSITIVE = {"joy", "happy", "excited"}
-NEGATIVE = {"sadness", "anger", "fear", "disgust", "sad", "angry", "anxious", "stressed"}
-NEUTRAL = {"neutral", "calm"}
+# Valence groups spanning the classifier labels AND the forecaster's next-state
+# labels, so deviation tracking and the reply router work on either vocabulary.
+POSITIVE = {"joy", "low_joy", "high_joy"}
+NEGATIVE = {
+    "sadness", "anger", "fear", "disgust",
+    "low_sadness", "high_sadness",
+    "low_anger", "high_anger",
+    "low_fear", "high_fear",
+}
+NEUTRAL = {"neutral"}
 OTHER = {"surprise"}
 
 SAME_EMOTION = 0.0
@@ -288,10 +338,58 @@ CLASSIFIER_METRICS = {
     "dataset": "DailyDialog-derived sentiment (5 classes)",
 }
 
+# Next-emotion-STATE forecaster, 13 classes, 1501 held-out rows. Every model in
+# the pipeline is listed, including the two the demo does not serve, because the
+# comparison is the finding.
+#
+# READ THIS BEFORE QUOTING THE NUMBERS. Accuracy clusters at 0.34-0.36 for all
+# six trained models -- and `baseline_prior_by_current_emotion`, which reads no
+# text whatsoever and just applies the transition rules plus the training prior,
+# scores 0.3438. The models are not beating it on accuracy. They beat it on
+# macro-F1 (0.30-0.34 against 0.18) only because balanced class weights spread
+# predictions across the reachable states instead of collapsing onto the
+# majority one.
+#
+# That is a property of the corpus, not of the training. The `next_emotion_state`
+# labels are synthetic and were not conditioned on the utterance: within every
+# current-emotion group a TF-IDF model on the text alone scores at or below the
+# majority baseline (measured: 0.335 against 0.372 for intensity). The one
+# column that does predict the target is `context_text`, at 1.0000 test
+# accuracy -- it was generated from the target and the pipeline excludes it as
+# leakage.
+#
+# So: the forecaster reliably encodes WHICH next states are possible and their
+# base rates. It does not, on this data, read a sentence and tell you whether
+# distress is about to escalate. Replacing the labels with observed sequential
+# annotations is what would change that, not a bigger model.
+#
+# ROC-AUC ~0.90 alongside ~0.35 accuracy is the signature of exactly this: the
+# ranking correctly separates the 3 reachable states from the 10 unreachable
+# ones, and is near chance within the reachable set.
 FORECASTER_METRICS = {
-    "textcnn": {"test_accuracy": 0.7217, "test_macro_f1": 0.7003},
-    "bilstm": {"test_accuracy": 0.7164, "test_macro_f1": 0.6903},
-    "distilbert": {"test_accuracy": 0.7177, "test_macro_f1": 0.7025},
-    "baseline_persistence": {"test_accuracy": 0.7270, "test_macro_f1": 0.7098},
-    "baseline_majority": {"test_accuracy": 0.2437, "test_macro_f1": 0.0490},
+    # --- served by this demo (PyTorch) ---
+    "bigru": {"test_accuracy": 0.3538, "test_macro_f1": 0.3295,
+              "test_roc_auc": 0.8989, "constrained_accuracy": 0.3538, "size_mb": 1.51},
+    "bilstm": {"test_accuracy": 0.3411, "test_macro_f1": 0.3137,
+               "test_roc_auc": 0.8996, "constrained_accuracy": 0.3411, "size_mb": 1.58},
+    "cnn_bilstm": {"test_accuracy": 0.3418, "test_macro_f1": 0.3131,
+                   "test_roc_auc": 0.8983, "constrained_accuracy": 0.3431, "size_mb": 4.15},
+    "textcnn": {"test_accuracy": 0.3444, "test_macro_f1": 0.3013,
+                "test_roc_auc": 0.9009, "constrained_accuracy": 0.3458, "size_mb": 2.99},
+    # --- trained by the same pipeline, not served (scikit-learn) ---
+    "linear_svm": {"test_accuracy": 0.3578, "test_macro_f1": 0.3381},
+    "logistic_regression": {"test_accuracy": 0.3538, "test_macro_f1": 0.3281},
+    # --- references ---
+    "baseline_prior_by_current_emotion": {"test_accuracy": 0.3438, "test_macro_f1": 0.1757},
+    "baseline_majority": {"test_accuracy": 0.2432, "test_macro_f1": 0.0301},
 }
+
+# Shown verbatim in the sidebar. The demo should not be able to drift from what
+# was actually measured, and it should not be able to overstate it either.
+FORECASTER_CAVEAT = (
+    "Trained on synthetic, rule-constrained labels. The model learns which "
+    "next states are reachable and their base rates; on this corpus the "
+    "utterance text does not separate them (no trained model beats a "
+    "text-free prior on accuracy). Treat a forecast as structure plus base "
+    "rate, not as evidence about this sentence."
+)
