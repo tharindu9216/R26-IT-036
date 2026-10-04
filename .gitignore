@@ -46,6 +46,7 @@ Thumbs.db
 data/**/raw/
 data/**/processed/
 models/
+agent/model
 
 # Generated analysis outputs
 reports/
@@ -56,3 +57,7 @@ reports/
 
 # Backend diary database
 backend/**/*.db
+
+# Local account and conversation stores
+agent/backend/*.sqlite3*
+agent/backend/*.db*

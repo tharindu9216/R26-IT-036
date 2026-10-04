@@ -1,0 +1,241 @@
+# Central place to point each supportive module (C1 sensor, C3 stress/CBT,
+# current emotion, next intensity, reply generation) at a different artifact or
+# generation setting without touching code. Loaded once by settings.py; every
+# entry point (app.py, cli.py, supportive_app.py, api.py) and the c3 stress/
+# CBT modules read paths from there instead of hardcoding them.
+#
+# All paths below are relative to model_root (itself relative to this file's
+# directory, i.e. backend/).
+
+model_root: ../model
+
+# Which machine this is. Everything below describes the single-machine
+# deployment; a profile in profiles/ overrides only the keys that differ on
+# another machine, so the tuned values here (fusion weights, thresholds,
+# support contacts) are shared by every deployment and cannot drift.
+#
+#   null / none      run everything on this machine, exactly as below
+#   single-highend   one 10 GB+ GPU: bf16 Qwen, C3 + emotion on CUDA
+#   single-4gb       one 4 GB laptop, no support node: 4-bit Qwen
+#   split-main       4 GB laptop + a ../node support server on the LAN
+#
+# Set it here once and it survives reboots. The AGENT_PROFILE environment
+# variable overrides this line for a single run:
+#   $env:AGENT_PROFILE = "single-4gb"; uvicorn api:app --port 8005
+# See ../DEPLOYMENT.md.
+profile: split-main
+
+# Runtime placement. Keeping the five C3 encoders and the emotion chain's
+# RoBERTa on CPU leaves GPU memory available for the 4B reply model.
+# Qwen's `auto` device map uses the GPU when available and can offload layers
+# to CPU when required. Change these values only when the deployment machine
+# has enough VRAM to colocate more models.
+runtime_devices:
+  c3: cpu
+  emotion: cpu
+  qwen: auto
+  c2: cpu
+  stt: cpu
+  tts: cpu
+
+# Which heavy services run inside this process and which are delegated to a
+# support node over the LAN. Every entry null (below) is the single-machine
+# setup this project started as -- nothing changes. Setting a URL makes the
+# matching service a thin HTTP client of a ``../node`` server, which is how a
+# 4 GB laptop runs the app: the 4B reply model (and optionally the three voice
+# models) live on a second machine. Only these four can be offloaded; C1, C3
+# and the emotion chain always stay in-process. See
+# ../DEPLOYMENT.md and profiles/.
+remote_services:
+  reply: null          # e.g. http://192.168.1.42:8010
+  stt: null
+  tts: null
+  c2: null
+  timeout_seconds: 180
+  # Optional shared secret; must match ``auth_token`` in the node's config.
+  auth_token: null
+
+# Browser origins allowed to call api.py. Add the LAN address the React app is
+# served from when the UI is opened from another device on the network.
+api:
+  cors_origins:
+    - http://localhost:5173
+    - http://127.0.0.1:5173
+    - http://localhost:4173
+    - http://127.0.0.1:4173
+
+# C1 -- sensor stress (BVP/EDA wearable)
+c1_sensor:
+  artifact_dir: c1
+  default_port: /dev/ttyUSB0
+  # Majority vote over the latest three 5-second predictions. During the
+  # first two predictions the required vote count is reduced to the amount
+  # of history available, so the first result is still immediately usable.
+  smoothing_window: 3
+  smoothing_required: 2
+
+# C2 -- voice-only appraisal/stress evidence. C2 never calls the C3 text
+# Stress or CBT headers; the transcript is used only by the emotion chain,
+# safety node, and reply generator.
+c2_voice:
+  audeering_model_dir: c2/audeering_emotion_model
+  appraisal_artifact: c2/appraisal/advanced_appraisal_engine.joblib
+  max_upload_mb: 25
+  max_audio_seconds: 180
+
+# Offline speech-to-text used before emotion-chain inference.
+speech_to_text:
+  model_dir: fasterwhisper
+  compute_type: int8
+  task: transcribe
+  language: null
+
+# Offline text-to-speech used after Qwen reply generation.
+text_to_speech:
+  model_dir: kokoro
+  voice: af_heart
+  language_code: a
+  speed: 1.0
+
+# C3 -- text stress + cognitive-distortion (CBT) headers.
+# Per-member checkpoints/weights/thresholds stay in their own validated
+# configs (c3/stress/config.py, c3/CBT/binary_config.json) -- only the
+# artifact directory is centralized here.
+c3_stress:
+  artifact_dir: c3/stress
+c3_stress_bertopic:
+  # Unsupervised topic-discovery output for the Stress header (BERTopic --
+  # see backend/c3/stress/bertopic/). A training artifact, not required by
+  # the live app; empty until train.py has been run.
+  artifact_dir: c3/stress/bertopic
+c3_cbt:
+  artifact_dir: c3/CBT
+c3_base_models:
+  artifact_dir: c3/base_models
+
+# User-selected decision-level (late) fusion of the C3 Stress + CBT headers'
+# probabilities into one signal for routing/reply generation. C1 sensor
+# stress is a different modality and stays independent of this fusion.
+decision_fusion:
+  # Options: weighted_average, or, stress_only, cbt_only. Keep the selected
+  # deployment policy here and use evaluate_fusion.py for ablation comparison.
+  method: weighted_average
+  stress_weight: 0.5
+  cbt_weight: 0.5
+  threshold: 0.5
+  stress_threshold: 0.5
+  cbt_threshold: 0.37
+
+# Confidence floor a negative forecast must clear to be counted as a routing
+# reason. It still filters -- the forecaster's decision threshold is 0.595, so a
+# `low` call made just under it reports a confidence below 0.5 and is dropped --
+# but it can no longer flip a route on its own: the next-intensity forecaster
+# keeps the current emotion's family, so it only names a negative state when the
+# current emotion is already negative, which routes anyway. See backend/README.md.
+routing:
+  next_negative_min_confidence: 0.5
+
+# How much each stress source is allowed to sway the WORDING of a reply. The
+# weight multiplies that model's own confidence, and the product is written
+# into the prompt ("influence 0.19 of 1.00"), so Qwen knows how far to lean on
+# it. This is not a gate: nothing is switched off and there is no threshold --
+# a low weight only means weaker evidence. 0.0 drops the source entirely.
+#
+# Text is what the user actually wrote, so it stays primary. C1 reads one
+# noisy 60-second window and C2 one appraisal frame, so both are secondary and
+# can be wrong; they are down-weighted accordingly.
+signal_influence:
+  text_weight: 1.0
+  sensor_weight: 0.3
+  voice_weight: 0.6
+
+# Decision-level fusion used by the stress badge and both conversation paths.
+# Voice appraisal remains a separate C2 signal; the shared stress score is the
+# six-question check-in (60%) plus the C1 wearable (40%). Missing sources are
+# removed and the remaining weights are normalized automatically.
+multimodal_stress:
+  questionnaire_weight: 0.6
+  sensor_weight: 0.4
+  voice_weight: 0.0
+  threshold: 0.5
+
+# Human contacts appended verbatim to the reply on a crisis turn, and on turns
+# the escalation rule reads as extremely negative: a negative current emotion
+# plus at least TWO agreeing signals out of a high-intensity forecast, a High
+# deviation from the previous turn, C1 sensor stress, the fused C3 text signal
+# and C2 voice stress. One signal is an ordinary bad day -- see
+# backend/emotion_chain/support_contacts.py for why the threshold is two.
+# They live here so a number can be corrected without a code change. Qwen is
+# instructed never to produce a phone number itself; the ones below are the only
+# contact details the app can emit. Remove every entry to disable escalation
+# contacts; deleting the whole key falls back to the module default.
+support_contacts:
+  - name: සුමිතුරෝ (Sumithuro)
+    phone: "077766889"
+    note: Emotional support contact
+    # What the English Kokoro voice says instead of `name` in voice mode; it
+    # cannot pronounce Sinhala script and would drop it from the audio.
+    spoken_name: Sumithuro
+
+# Current-emotion classifier (RoBERTa, 5 labels)
+current_emotion:
+  artifact_dir: current_emotion_classifier
+
+# Next-intensity forecaster: will the user's NEXT turn be more or less intense
+# (low/high), given this turn's text and the current-emotion model's output.
+# The artifact is the locked hybrid selected in model/forcast -- a sparse
+# TF-IDF+emotion logistic model blended 50/50 with a three-seed MLP ensemble
+# over frozen embeddings from the current-emotion RoBERTa. Blend weights and
+# the decision threshold live in the artifact's own metadata.json (validation-
+# selected; nothing is retuned at load time), so this stays a directory.
+# Its root metadata.json points to the trained artifacts under model_train/.
+#
+# It replaces the 13-label next-emotion forecaster that predicted the next
+# *family*. This one does not: the family is carried over from the current
+# emotion and only the intensity is predicted, so `neutral` turns keep
+# `neutral` as their next state. See backend/README.md.
+next_intensity:
+  artifact_dir: forcast
+
+# Reply generation: Qwen base model + the ESConv LoRA adapter, and the
+# generation settings used for every reply regardless of route.
+reply_generation:
+  qwen_base_dir: qwen3-4b-instruct
+  qwen_adapter_dir: esconv_reply_adapter
+  # Whether the supportive route actually enables the ESConv LoRA. With `true`
+  # the adapter answers (short, reflective ESConv-style turns, rarely a
+  # concrete next step); with `false` the same supportive prompt is answered by
+  # the base model, which follows the acknowledge/reflect/step/question
+  # structure but is no longer the fine-tuned adapter. Set `true` to reproduce
+  # the adapter results. Routing and the reported route are unaffected either
+  # way -- this only decides which weights generate the text.
+  use_adapter: false
+  # Weight precision for the base model. `none` keeps the exported bf16
+  # weights (~8 GB VRAM -- what this machine's RTX 3080 runs today); `nf4`
+  # quantizes to 4-bit through bitsandbytes (~3 GB, fits a 4 GB laptop GPU) at
+  # a small quality cost; `int8` is the middle option (~5 GB). Ignored when
+  # `remote_services.reply` points at a support node -- the node's own config
+  # decides there.
+  quantization: none
+  # How many earlier exchanges (a user message plus its reply) are replayed
+  # into the prompt. Every turn is also KV cache: six long ones can add
+  # ~1.4 GB of VRAM on top of the weights, which is the difference between
+  # fitting a 4 GB card and not. Lower it there (the split-main / single-4gb
+  # profiles do); 6 is the original value.
+  history_turns: 6
+  max_new_tokens: 160
+  temperature: 0.7
+  top_p: 0.8
+
+# Where api.py keeps each chat session's turns so the next reply can be
+# generated with the conversation so far. A plain SQLite file (stdlib sqlite3),
+# so there is no service to run and the history outlives a backend restart.
+chat_history:
+  # Relative to backend/. Inspect it with: sqlite3 chat_sessions.db
+  db_file: chat_sessions.db
+  # A session untouched for this long is deleted on the next write. 24 hours.
+  ttl_seconds: 86400
+  # Hard cap on the messages kept per session. Only the newest `history_turns`
+  # exchanges ever reach the prompt; this bounds the file, and leaves enough
+  # behind it for /api/chat/history to redraw the conversation after a reload.
+  max_messages: 200

@@ -9,17 +9,20 @@ import torch
 import torch.nn as nn
 
 from .config import (
+    CBT_CALIBRATION_PATH,
     CBT_BINARY_CONFIG_PATH,
     CBT_MODEL_DIR,
     CBT_RUNTIME_HF_ID_OVERRIDES,
     CBT_TRAIN_MODEL_PATH,
     DEVICE,
 )
+from .calibration import TemperatureCalibrator
 from .ensembles import (
     EnsembleMemberResources,
     EnsembleMemberSpec,
     WeightedEnsemblePredictor,
 )
+from .preprocessing import preprocess_cbt_text
 
 
 def _binary_model_class():
@@ -61,12 +64,20 @@ class CBTPredictor:
     being re-derived here.
     """
 
-    def __init__(self):
+    def __init__(self, *, use_calibration: bool = True):
         self._device = _resolve_device()
         self._labels = {"0": "No Distortion", "1": "Distortion"}
-        self._ensemble = self._build_ensemble()
+        calibrator = (
+            TemperatureCalibrator.from_json(CBT_CALIBRATION_PATH)
+            if use_calibration
+            else None
+        )
+        self._ensemble = self._build_ensemble(calibrator)
 
-    def _build_ensemble(self) -> WeightedEnsemblePredictor:
+    def _build_ensemble(
+        self,
+        calibrator: TemperatureCalibrator | None,
+    ) -> WeightedEnsemblePredictor:
         if not CBT_BINARY_CONFIG_PATH.exists():
             raise FileNotFoundError(f"Missing CBT config: {CBT_BINARY_CONFIG_PATH}")
         config = json.loads(CBT_BINARY_CONFIG_PATH.read_text(encoding="utf-8"))
@@ -106,6 +117,8 @@ class CBTPredictor:
             labels=self._labels,
             threshold=float(deployment["threshold"]),
             device=self._device,
+            preprocess_fn=preprocess_cbt_text,
+            calibrator=calibrator,
         )
 
     def load(self) -> None:
@@ -115,12 +128,25 @@ class CBTPredictor:
     def is_loaded(self) -> bool:
         return self._ensemble.is_loaded
 
+    @property
+    def calibration(self) -> dict | None:
+        return self._ensemble.calibration_summary
+
+    def predict_proba_many_raw(self, texts: list[str], batch_size: int = 8):
+        return self._ensemble.predict_proba_many_raw(texts, batch_size=batch_size)
+
     def xai_resources(
         self,
         member_name: str = "DeBERTa-v3",
     ) -> EnsembleMemberResources:
         """Expose one trained member for an explicitly labelled XAI request."""
         return self._ensemble.member_resources(member_name)
+
+    def xai_ensemble_resources(self) -> tuple[EnsembleMemberResources, ...]:
+        return self._ensemble.all_member_resources()
+
+    def preprocess_for_member(self, text: str, member_name: str) -> str:
+        return self._ensemble.preprocess(text, member_name)
 
     def predict(self, text: str) -> CBTPredictionResult:
         result = self._ensemble.predict(text)

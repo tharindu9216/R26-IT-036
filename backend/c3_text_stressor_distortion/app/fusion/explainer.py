@@ -11,7 +11,8 @@ from .decision import FusionDecision, FusionState
 DISCLAIMER = (
     "The SHAP, LIME, and Integrated Gradients consensus describes model "
     "behaviour, not psychological facts or a diagnosis. The combined state "
-    "is produced by a transparent rule."
+    "is produced by a transparent rule. Member attributions are normalized "
+    "and combined with the deployed ensemble weights."
 )
 CONSENSUS_METHODS = ["Integrated Gradients", "SHAP", "LIME"]
 
@@ -102,6 +103,8 @@ def compose_explanation(
     cbt_lime_r2: float | None = None,
     stress_model: str = "DeBERTa-v3",
     cbt_model: str = "DeBERTa-v3",
+    stress_ensemble_members: dict[str, float] | None = None,
+    cbt_ensemble_members: dict[str, float] | None = None,
     errors: Iterable[str] | None = None,
 ) -> dict:
     stress_evidence = _serialise_evidence(
@@ -133,7 +136,7 @@ def compose_explanation(
 
     return {
         "fusion": decision.as_dict(),
-        "method": "hierarchical_rule_trace_with_ig_shap_lime_consensus",
+        "method": "ensemble_weighted_ig_shap_lime_with_rule_trace",
         "methods_used": CONSENSUS_METHODS,
         "xai_status": status,
         "stress_evidence": stress_evidence,
@@ -146,6 +149,8 @@ def compose_explanation(
         "cbt_lime_r2": (
             float(cbt_lime_r2) if cbt_lime_r2 is not None else None
         ),
+        "stress_ensemble_members": dict(stress_ensemble_members or {}),
+        "cbt_ensemble_members": dict(cbt_ensemble_members or {}),
         "overlap_evidence": overlap,
         "fusion_reason": rule_trace(decision),
         "errors": error_list,
