@@ -1,0 +1,79 @@
+# Support-node configuration.
+#
+# This machine runs one or more of the app's heavy models and answers the
+# backend over the LAN. It holds no conversation state and makes no routing,
+# safety or escalation decisions -- those stay in ../backend so a two-machine
+# deployment behaves exactly like a one-machine one.
+#
+# Paths are relative to model_root, which is itself relative to this file.
+
+model_root: ../model
+
+# 0.0.0.0 makes the node reachable from the other laptop; use 127.0.0.1 to
+# keep it local while testing on one machine.
+host: 0.0.0.0
+port: 8010
+
+# Optional shared secret. When set, requests must carry the same value in an
+# X-Auth-Token header, and the backend's remote_services.auth_token must match.
+# Worth setting on a shared or campus network; null is fine at home.
+auth_token: null
+
+# Which models this node hosts. Every enabled service is validated at startup
+# (missing weights fail immediately rather than on the first request), so
+# switch off anything whose artifacts you did not copy here.
+services:
+  reply: true
+  stt: true
+  tts: true
+  # C2 needs the backend's c2.appraisal_stress package as well as the weights
+  # -- see the note under `c2:` below. Off by default.
+  c2: false
+
+# false keeps every model lazy (first request pays the load cost, ~40 s for
+# Qwen); true loads them during startup so the first user turn is already
+# fast. Turn it on once the node is a permanent part of the setup.
+preload: false
+
+# Reply generation -- the one model that actually needs a GPU here.
+reply:
+  qwen_base_dir: qwen3-4b-instruct
+  qwen_adapter_dir: esconv_reply_adapter
+  # `auto` uses the GPU and spills to CPU if it has to; pin to `cuda:0` to
+  # fail loudly instead of silently running at CPU speed.
+  device: auto
+  # nf4 is what makes the 4B model fit a 4 GB laptop GPU (~3 GB instead of
+  # ~8 GB). Use `none` on a 10 GB+ card for the exported bf16 weights.
+  quantization: nf4
+  # Fallbacks only; the backend sends its own values from its config.yaml.
+  max_new_tokens: 160
+  temperature: 0.7
+  top_p: 0.8
+
+speech_to_text:
+  model_dir: fasterwhisper
+  # int8 on CPU is the tested combination; `cuda` + float16 is faster but
+  # competes with Qwen for the same 4 GB.
+  device: cpu
+  compute_type: int8
+  task: transcribe
+  language: null
+
+text_to_speech:
+  model_dir: kokoro
+  voice: af_heart
+  language_code: a
+  device: cpu
+  speed: 1.0
+
+# C2 voice appraisal. The fitted fuzzy engine is a joblib artifact pickled
+# against the backend's `c2.appraisal_stress` package, so hosting C2 here needs
+# that package importable -- copy ../backend (its .py files are ~1 MB; the
+# weights all live in ../model) and leave appraisal_package_dir as-is. If you
+# copied only this folder and ../model, keep services.c2 false and let C2 run
+# on the main machine, where it is a CPU model anyway.
+c2:
+  audeering_model_dir: c2/audeering_emotion_model
+  appraisal_artifact: c2/appraisal/advanced_appraisal_engine.joblib
+  device: cpu
+  appraisal_package_dir: ../backend

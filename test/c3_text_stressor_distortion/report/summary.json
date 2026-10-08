@@ -1,0 +1,32 @@
+{
+  "successful": false,
+  "elapsed_seconds": 23.786,
+  "metrics": {
+    "Stress": {
+      "total": 10,
+      "passed": 10,
+      "failed": 0,
+      "accuracy": 1.0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "true_negative": 5,
+      "false_positive": 0,
+      "false_negative": 0,
+      "true_positive": 5
+    },
+    "CBT": {
+      "total": 10,
+      "passed": 8,
+      "failed": 2,
+      "accuracy": 0.8,
+      "precision": 0.8,
+      "recall": 0.8,
+      "f1": 0.8000000000000002,
+      "true_negative": 4,
+      "false_positive": 1,
+      "false_negative": 1,
+      "true_positive": 4
+    }
+  }
+}

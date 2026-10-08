@@ -11,11 +11,30 @@ updated slowly and the newly added classification head learns faster.
 """
 
 import re
+from pathlib import Path
 
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
-from transformers import AutoModel
+from transformers import AutoConfig, AutoModel
+
+
+def _load_encoder(hf_id):
+    """Load pretrained weights for training or a local inference scaffold.
+
+    Deployment checkpoints contain the full encoder state. When the runtime
+    passes a tokenizer/config-only local directory, initializing from config
+    avoids a network/base-weight dependency before the caller loads that
+    fine-tuned state dict.
+    """
+    runtime_path = Path(hf_id)
+    if runtime_path.exists():
+        config = AutoConfig.from_pretrained(
+            runtime_path,
+            local_files_only=True,
+        )
+        return AutoModel.from_config(config)
+    return AutoModel.from_pretrained(hf_id)
 
 
 # Two-Layer Classification Head (spec: Linear→GELU→Dropout→Linear)
@@ -49,7 +68,7 @@ class CDTModel(nn.Module):
                  head_dropout=0.1,
                  intermediate=256):
         super().__init__()
-        self.encoder    = AutoModel.from_pretrained(hf_id)
+        self.encoder    = _load_encoder(hf_id)
         hidden          = self.encoder.config.hidden_size
 
         self.layer_norm = nn.LayerNorm(hidden)
@@ -86,7 +105,7 @@ class BinaryCDTModel(nn.Module):
     def __init__(self, hf_id, dropout=0.3, head_dropout=0.1,
                  intermediate=256):
         super().__init__()
-        self.encoder = AutoModel.from_pretrained(hf_id)
+        self.encoder = _load_encoder(hf_id)
         hidden = self.encoder.config.hidden_size
         self.layer_norm = nn.LayerNorm(hidden)
         self.dropout = nn.Dropout(dropout)

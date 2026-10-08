@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.py[cod]
+.streamlit/
+
+# Per-session chat history written by chat_store.py (plus its WAL sidecars).
+chat_sessions.db
+chat_sessions.db-wal
+chat_sessions.db-shm

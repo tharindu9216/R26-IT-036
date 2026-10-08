@@ -70,6 +70,8 @@ class FusionExplanationResponse(BaseModel):
     cbt_feature_evidence: list[CombinedFeatureEvidenceResponse]
     stress_lime_r2: float | None
     cbt_lime_r2: float | None
+    stress_ensemble_members: dict[str, float]
+    cbt_ensemble_members: dict[str, float]
     overlap_evidence: list[TokenEvidenceResponse]
     fusion_reason: str
     errors: list[str]

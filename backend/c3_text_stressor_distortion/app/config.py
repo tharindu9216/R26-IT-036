@@ -4,6 +4,7 @@ import os
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 COMPONENT_BACKEND_ROOT = Path(__file__).resolve().parents[1]
+LOCAL_BASE_MODEL_DIR = PROJECT_ROOT / "agent/model/c3/base_models"
 
 DEVICE = os.getenv("STRESS_DEVICE", "auto")
 
@@ -26,18 +27,18 @@ DEFAULT_NUM_SUBREDDITS = 10
 # Stress training ensemble.
 STRESS_ENSEMBLE_MEMBERS = {
     "BERT": {
-        "checkpoint": Path(os.getenv("STRESS_BERT_CHECKPOINT", MODEL_DIR / "BERT_best.pt")),
+        "checkpoint": Path(os.getenv("STRESS_BERT_CHECKPOINT", MODEL_DIR / "BERT_final.pt")),
         "hf_id": "bert-base-uncased",
-        "runtime_hf_id": "bert-base-uncased",
+        "runtime_hf_id": str(LOCAL_BASE_MODEL_DIR / "bert-base-uncased"),
         "max_len": 192,
         "weight": 0.5,
     },
     "DeBERTa-v3": {
         "checkpoint": Path(
-            os.getenv("DEBERTA_CHECKPOINT", MODEL_DIR / "DeBERTa-v3_best.pt")
+            os.getenv("DEBERTA_CHECKPOINT", MODEL_DIR / "DeBERTa-v3_final.pt")
         ),
         "hf_id": "microsoft/deberta-v3-base",
-        "runtime_hf_id": "microsoft/deberta-v3-base",
+        "runtime_hf_id": str(LOCAL_BASE_MODEL_DIR / "deberta-v3-base"),
         "max_len": 192,
         "weight": 0.5,
     },
@@ -45,6 +46,12 @@ STRESS_ENSEMBLE_MEMBERS = {
 # This exactly reproduces STEP 4 in Stress header/train/train.py and the saved
 # Ensemble_BERT_DeBERTa-v3 entry in all_results.json.
 STRESS_DECISION_THRESHOLD = 0.5
+STRESS_CALIBRATION_PATH = Path(
+    os.getenv(
+        "STRESS_CALIBRATION_PATH",
+        MODEL_DIR / "stress_ensemble_calibration.json",
+    )
+)
 
 # CBT header — 3-transformer ensemble (BERT + MentalBERT + DeBERTa-v3),
 # weights + threshold come from the existing OOF-selected deployment config.
@@ -66,7 +73,17 @@ CBT_TRAIN_MODEL_PATH = Path(
 )
 # MentalBERT is gated on HF — reuse the public BERT-base scaffold, same as
 # the existing CBT XAI loader (ai_components/.../CBT header/xai/model_loader.py).
-CBT_RUNTIME_HF_ID_OVERRIDES = {"MentalBERT": "bert-base-uncased"}
+CBT_RUNTIME_HF_ID_OVERRIDES = {
+    "BERT": str(LOCAL_BASE_MODEL_DIR / "bert-base-uncased"),
+    "MentalBERT": str(LOCAL_BASE_MODEL_DIR / "bert-base-uncased"),
+    "DeBERTa-v3": str(LOCAL_BASE_MODEL_DIR / "deberta-v3-base"),
+}
+CBT_CALIBRATION_PATH = Path(
+    os.getenv(
+        "CBT_CALIBRATION_PATH",
+        CBT_MODEL_DIR / "binary_ensemble_calibration.json",
+    )
+)
 
 # Stress header — BERTopic life-theme tagging (work, relationships, health, ...).
 # Live inference reuses the saved topic centroids rather than reloading the

@@ -2,23 +2,27 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 import torch.nn as nn
-from transformers import AutoModel
+from transformers import AutoConfig, AutoModel
 
 from .config import (
     DEFAULT_NUM_SUBREDDITS,
     DEVICE,
     METADATA_PATH,
     STRESS_DECISION_THRESHOLD,
+    STRESS_CALIBRATION_PATH,
     STRESS_ENSEMBLE_MEMBERS,
 )
+from .calibration import TemperatureCalibrator
 from .ensembles import (
     EnsembleMemberResources,
     EnsembleMemberSpec,
     WeightedEnsemblePredictor,
 )
+from .preprocessing import preprocess_stress_text
 
 
 class ClassificationHead(nn.Module):
@@ -48,7 +52,15 @@ class DualHeadStressModel(nn.Module):
         intermediate: int = 256,
     ):
         super().__init__()
-        self.encoder = AutoModel.from_pretrained(hf_id)
+        runtime_path = Path(hf_id)
+        if runtime_path.exists():
+            config = AutoConfig.from_pretrained(
+                runtime_path,
+                local_files_only=True,
+            )
+            self.encoder = AutoModel.from_config(config)
+        else:
+            self.encoder = AutoModel.from_pretrained(hf_id)
         hidden = self.encoder.config.hidden_size
         self.layer_norm = nn.LayerNorm(hidden)
         self.dropout = nn.Dropout(dropout)
@@ -86,11 +98,16 @@ class StressPredictor:
     See STRESS_ENSEMBLE_MEMBERS / STRESS_DECISION_THRESHOLD in config.py.
     """
 
-    def __init__(self):
+    def __init__(self, *, use_calibration: bool = True):
         self._device = _resolve_device()
         self._num_subreddits = DEFAULT_NUM_SUBREDDITS
         self._labels = {"0": "Not Stressed", "1": "Stressed"}
         self._load_metadata()
+        calibrator = (
+            TemperatureCalibrator.from_json(STRESS_CALIBRATION_PATH)
+            if use_calibration
+            else None
+        )
 
         members = [
             EnsembleMemberSpec(
@@ -111,6 +128,8 @@ class StressPredictor:
             labels=self._labels,
             threshold=STRESS_DECISION_THRESHOLD,
             device=self._device,
+            preprocess_fn=preprocess_stress_text,
+            calibrator=calibrator,
         )
 
     def _build_model(self, runtime_hf_id: str, intermediate: int) -> nn.Module:
@@ -139,12 +158,25 @@ class StressPredictor:
     def checkpoint_paths(self) -> dict[str, str]:
         return {name: str(spec["checkpoint"]) for name, spec in STRESS_ENSEMBLE_MEMBERS.items()}
 
+    @property
+    def calibration(self) -> dict | None:
+        return self._ensemble.calibration_summary
+
+    def predict_proba_many_raw(self, texts: list[str], batch_size: int = 8):
+        return self._ensemble.predict_proba_many_raw(texts, batch_size=batch_size)
+
     def xai_resources(
         self,
         member_name: str = "DeBERTa-v3",
     ) -> EnsembleMemberResources:
         """Expose one trained member for an explicitly labelled XAI request."""
         return self._ensemble.member_resources(member_name)
+
+    def xai_ensemble_resources(self) -> tuple[EnsembleMemberResources, ...]:
+        return self._ensemble.all_member_resources()
+
+    def preprocess_for_member(self, text: str, member_name: str) -> str:
+        return self._ensemble.preprocess(text, member_name)
 
     def predict(self, text: str) -> PredictionResult:
         result = self._ensemble.predict(text)

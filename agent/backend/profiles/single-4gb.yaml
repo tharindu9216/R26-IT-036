@@ -1,0 +1,30 @@
+# Profile: one 4 GB laptop, no support node.
+#
+#   $env:AGENT_PROFILE = "single-4gb"
+#
+# The fallback when the second laptop is not available. Qwen loads 4-bit and
+# takes the whole GPU (~3.4 GB peak, ~3.7 GB with the CUDA context), so every
+# other model stays on CPU exactly as in the default config. Replies are
+# slower than the split setup and slightly lower quality than bf16, but
+# nothing is disabled and no second machine is needed.
+
+runtime_devices:
+  c3: cpu
+  emotion: cpu
+  qwen: auto
+  c2: cpu
+  stt: cpu
+  tts: cpu
+
+reply_generation:
+  # 4-bit weights are what make the 4B model fit at all (~2.3 GB instead of
+  # ~8 GB). Quality drops slightly versus bf16; routing is unaffected.
+  quantization: nf4
+  # Less history than the base config: every replayed turn is also KV cache,
+  # and the long ones push peak reserved VRAM past what a 4 GB card has.
+  # Measured at 3.40 GB here, against 3.77 GB for one more exchange; drop to 1
+  # (3.08 GB) if you still see CUDA out-of-memory. See ../../DEPLOYMENT.md.
+  #
+  # Was 4 when `history_turns` was applied as a message count; 2 exchanges is
+  # the same four replayed messages those figures were measured with.
+  history_turns: 2
