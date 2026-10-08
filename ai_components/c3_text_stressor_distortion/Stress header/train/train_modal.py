@@ -1,8 +1,29 @@
+"""Modal cloud runner for the stress classification training pipeline.
 
+This script prepares a Modal cloud environment, installs the required packages,
+uploads the project files, requests a GPU, and runs train.py on Modal.
+
+The trained models, logs, metrics, and plots are saved into a Modal volume so
+they can be downloaded after training.
+"""
 import modal, os, re
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+def find_project_root():
+    here = Path(__file__).resolve()
+    for candidate in (here.parent, *here.parents):
+        if (candidate / '.env').exists() and (candidate / 'ai_components').exists():
+            return candidate
+
+    modal_project_root = Path('/root/stress_detection')
+    if modal_project_root.exists():
+        return modal_project_root
+
+    return here.parent
+
+
+PROJECT_ROOT = find_project_root()
 ENV_PATH = PROJECT_ROOT / '.env'
 
 
@@ -27,6 +48,8 @@ if not hf_token:
         f'HF_TOKEN not found in environment or {ENV_PATH}. '
         'Add HF_TOKEN=... to .env before running Modal.'
     )
+
+modal_gpu = load_env_value('MODAL_GPU') or 'A100-80GB'
 
 image = (
     modal.Image.debian_slim(python_version='3.11')
@@ -55,7 +78,7 @@ app    = modal.App('stress-detection')
 
 
 @app.function(
-    gpu     = 'A100',        # change to 'L4' for a cheaper test run
+    gpu     = modal_gpu,     # set MODAL_GPU=A100 after adding a payment method
     image   = image,
     timeout = 3600 * 8,      # 8 hour max
     secrets = [modal.Secret.from_dict({'HF_TOKEN': hf_token})],
@@ -80,13 +103,20 @@ def run_training():
         print('WARNING: No GPU!')
         batch = 8
 
+    remote_project_root = '/root/stress_detection'
+    remote_train_dir = (
+        remote_project_root
+        + '/ai_components/c3_text_stressor_distortion/Stress header/train'
+    )
+    remote_data_dir = remote_project_root + '/data/Stress header/processed'
+
     # Set paths
-    os.environ['DATA_DIR']   = '/root/stress_detection/data/processed/'
+    os.environ['DATA_DIR']   = remote_data_dir
     os.environ['OUTPUT_DIR'] = '/results/training_outputs/'
     os.makedirs('/results/training_outputs/', exist_ok=True)
 
     # Patch batch size in config
-    cfg_path = '/root/stress_detection/train/config.py'
+    cfg_path = os.path.join(remote_train_dir, 'config.py')
     cfg      = open(cfg_path).read()
     cfg      = re.sub(r"'batch_size'\s*:\s*\d+,",
                       f"'batch_size'       : {batch},",
@@ -96,10 +126,10 @@ def run_training():
 
     # Verify files
     required = [
-        '/root/stress_detection/data/processed/dreaddit_train.csv',
-        '/root/stress_detection/data/processed/dreaddit_val.csv',
-        '/root/stress_detection/data/processed/dreaddit_test.csv',
-        '/root/stress_detection/data/processed/metadata.json',
+        os.path.join(remote_data_dir, 'dreaddit_train.csv'),
+        os.path.join(remote_data_dir, 'dreaddit_val.csv'),
+        os.path.join(remote_data_dir, 'dreaddit_test.csv'),
+        os.path.join(remote_data_dir, 'metadata.json'),
     ]
     print('\nVerifying:')
     for p in required:
@@ -116,9 +146,9 @@ def run_training():
 
     t0     = time.time()
     result = subprocess.run(
-        [sys.executable, '/root/stress_detection/train/train.py'],
+        [sys.executable, os.path.join(remote_train_dir, 'train.py')],
         capture_output=False,
-        cwd='/root/stress_detection/train',
+        cwd=remote_train_dir,
     )
     elapsed = time.time() - t0
     h, m    = int(elapsed // 3600), int((elapsed % 3600) // 60)
@@ -162,4 +192,5 @@ def main():
     print('\nSubmitting to Modal...')
     r = run_training.spawn().get()
     print(f'\nDone! Status={r["status"]} Time={r["hours"]}h')
-    print('Download: modal volume get stress-outputs /results ./local_results/')
+    print('Download: mkdir -p local_results && '
+          'modal volume get stress-outputs training_outputs ./local_results/')

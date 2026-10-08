@@ -1,3 +1,10 @@
+"""K-Fold training for transformer stress classification models.
+
+This module trains a transformer model using 5 different train-validation
+splits. It saves the best fold model based on validation F1 score and then
+evaluates that best model on the final test dataset.
+"""
+
 
 import os
 import torch
@@ -86,6 +93,12 @@ def train_kfold(model_name, hf_id, text_col, max_len,
         best_f1, best_m, history = trainer.fit(
             train_loader, val_loader, crit_1a, crit_1b, fold_path)
 
+        # Epoch at which this fold hit its best val F1 (1-indexed epoch
+        # count) — used later to pick an epoch budget for the full-data
+        # refit. `history['val_f1']` only has entries up to early stopping,
+        # so this is always in range.
+        best_epoch = history['val_f1'].index(max(history['val_f1'])) + 1
+
         if best_f1 > best_global_f1:
             best_global_f1 = best_f1
             torch.save(model.state_dict(), best_model_path)
@@ -94,16 +107,17 @@ def train_kfold(model_name, hf_id, text_col, max_len,
                            f'(Fold {fold+1})')
 
         fold_results.append({
-            'fold'   : fold + 1,
-            'val_f1' : best_f1,
-            'history': history,
+            'fold'      : fold + 1,
+            'val_f1'    : best_f1,
+            'best_epoch': best_epoch,
+            'history'   : history,
         })
 
         #  Free GPU memory after each fold
         del model
         torch.cuda.empty_cache()
 
-    # ── Test evaluation with best fold model ──────────────────────────────────
+    #  Test evaluation with best fold model 
     if logger:
         logger.log('\n  Loading best model → test evaluation...')
 
@@ -151,4 +165,85 @@ def train_kfold(model_name, hf_id, text_col, max_len,
         'test_labels'  : test_m['labels'],
         'test_probs'   : test_m['probs'],
         'model_path'   : best_model_path,
+    }
+
+
+def train_final(model_name, hf_id, text_col, max_len,
+                full_df, test_df, hp, crit_1a, crit_1b,
+                num_subreddits, tokenizer, num_epochs, logger=None):
+    """
+    Refit a single model on 100% of train+val (full_df) for a fixed
+    `num_epochs`, then evaluate once on the held-out test set.
+
+    This is the model that should actually be reported/deployed. K-Fold CV
+    (train_kfold, above) is used to validate hyperparameters and to derive
+    `num_epochs` (e.g. the average best-epoch across folds) — not to
+    hand-pick whichever fold happened to score highest on its own
+    validation split, which biases the reported result toward a lucky draw
+    instead of the true expected performance.
+    """
+    if logger:
+        logger.section(
+            f'Final Refit: {model_name} '
+            f'({num_epochs} epochs, 100% train+val)')
+
+    os.makedirs(Config.OUTPUT_DIR, exist_ok=True)
+
+    test_loader = DataLoader(
+        StressDataset(test_df, tokenizer, text_col, max_len),
+        batch_size=hp['batch_size'], shuffle=False,
+        num_workers=2, pin_memory=True)
+
+    full_ds = StressDataset(
+        full_df.reset_index(drop=True),
+        tokenizer, text_col, max_len,
+        augment=Config.AUGMENTATION.get('enabled', False),
+    )
+    full_loader = DataLoader(
+        full_ds, batch_size=hp['batch_size'], shuffle=True,
+        num_workers=2, pin_memory=True)
+
+    model = DualHeadStressModel(
+        hf_id,
+        dropout              = hp.get('dropout', 0.3),
+        head_dropout         = hp.get('head_dropout', 0.1),
+        intermediate         = hp.get('intermediate', 256),
+        num_subreddit_labels = num_subreddits,
+    ).to(Config.DEVICE)
+
+    optimizer = get_layerwise_optimizer(
+        model,
+        base_lr      = hp.get('learning_rate', 2e-5),
+        lr_decay     = hp.get('lr_decay',      0.9),
+        head_lr_mult = hp.get('head_lr_mult',  10.0),
+        weight_decay = hp.get('weight_decay',  0.01),
+    )
+
+    final_path = os.path.join(Config.OUTPUT_DIR, f'{model_name}_final.pt')
+    trainer    = Trainer(model, optimizer, hp, logger=logger)
+
+    history = trainer.fit_fixed_epochs(
+        full_loader, crit_1a, crit_1b, final_path, num_epochs)
+
+    if logger:
+        logger.log('\n  Evaluating final refit model on test set...')
+    test_m = trainer.evaluate(test_loader, crit_1a, crit_1b)
+
+    if logger:
+        logger.log(f'  {model_name} Final Refit — Test F1  : {test_m["f1_macro"]:.4f}')
+        logger.log(f'  {model_name} Final Refit — Test Acc : {test_m["accuracy"]:.4f}')
+        logger.log(f'  {model_name} Final Refit — Test MCC : {test_m["mcc"]:.4f}')
+
+    del model
+    torch.cuda.empty_cache()
+
+    return {
+        'num_epochs'   : num_epochs,
+        'history'      : history,
+        'test_metrics' : {k: v for k, v in test_m.items()
+                          if k not in ['preds', 'labels', 'probs']},
+        'test_preds'   : test_m['preds'],
+        'test_labels'  : test_m['labels'],
+        'test_probs'   : test_m['probs'],
+        'model_path'   : final_path,
     }

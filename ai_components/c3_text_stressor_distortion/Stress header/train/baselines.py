@@ -1,4 +1,14 @@
 
+"""Machine learning baseline models for stress classification.
+
+This module trains traditional text classification baselines using TF-IDF
+features with Logistic Regression and Linear SVM models.
+
+The baselines are trained on the combined training and validation data, then
+evaluated on the test set. Their results provide a comparison point for the
+transformer-based models.
+"""
+
 import os
 import pickle
 import numpy as np

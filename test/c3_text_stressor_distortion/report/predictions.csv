@@ -1,0 +1,21 @@
+header,case_id,text,expected_label,predicted_label,positive_probability,confidence,correct,status,duration_seconds,message
+CBT,CBT001,If I make one mistake in this presentation then the whole thing will be a complete disaster.,1,1,0.7666898965835571,0.7666898965835571,True,passed,6.499,
+CBT,CBT002,I missed one deadline so I am obviously useless at every job.,1,1,0.8045234680175781,0.8045234680175781,True,passed,1.092,
+CBT,CBT003,My friend has not replied yet; she must be angry with me.,1,0,0.41164278984069824,0.5883572101593018,False,failed,1.121,"AssertionError: 0 != 1 : CBT003: expected distortion=True, got 'No Distortion' with confidence 0.5884"
+CBT,CBT004,Nothing ever works out for me and it never will.,1,1,0.8536975383758545,0.8536975383758545,True,passed,1.107,
+CBT,CBT005,Either I get the highest grade or I am a failure.,1,1,0.7174780964851379,0.7174780964851379,True,passed,1.104,
+CBT,CBT006,I made an error in the report and can correct it before tomorrow's review.,0,0,0.08306316286325455,0.9169368371367455,True,passed,1.104,
+CBT,CBT007,My friend has not replied; she may be busy so I will check in later.,0,0,0.07381787896156311,0.9261821210384369,True,passed,1.176,
+CBT,CBT008,One low grade is disappointing but it does not define my overall ability.,0,1,0.6047860980033875,0.6047860980033875,False,failed,1.169,"AssertionError: 1 != 0 : CBT008: expected distortion=False, got 'Distortion' with confidence 0.6048"
+CBT,CBT009,I need help with this task and asking a colleague is a reasonable option.,0,0,0.11914745718240738,0.8808525428175926,True,passed,1.155,
+CBT,CBT010,Tomorrow could be challenging or it could go smoothly; I cannot know yet.,0,0,0.47780025005340576,0.5221997499465942,True,passed,1.166,
+Stress,STR001,I am overwhelmed by work and cannot keep up with the deadlines anymore.,1,1,0.9018716812133789,0.9018716812133789,True,passed,3.907,
+Stress,STR002,Bills keep arriving and I am terrified that I will not make rent this month.,1,1,0.8967069387435913,0.8967069387435913,True,passed,0.321,
+Stress,STR003,Everything is piling up at once and I feel close to breaking down.,1,1,0.9498461484909058,0.9498461484909058,True,passed,0.32,
+Stress,STR004,I cannot stop worrying about the medical results and my stomach is in knots.,1,1,0.9504511952400208,0.9504511952400208,True,passed,0.33,
+Stress,STR005,I have been worrying nonstop for days and cannot settle my thoughts.,1,1,0.9411404132843018,0.9411404132843018,True,passed,0.31,
+Stress,STR006,I completed my work early and feel relaxed this evening.,0,0,0.11875367909669876,0.8812463209033012,True,passed,0.324,
+Stress,STR007,I slept well and am looking forward to meeting my friends today.,0,0,0.1048816442489624,0.8951183557510376,True,passed,0.329,
+Stress,STR008,There are two tasks left and I have enough time to complete both.,0,0,0.23412472009658813,0.7658752799034119,True,passed,0.328,
+Stress,STR009,I spent the afternoon gardening and noticed how calm I felt.,0,0,0.11611584573984146,0.8838841542601585,True,passed,0.33,
+Stress,STR010,The repair took longer than expected but the issue is fixed now.,0,0,0.14353066682815552,0.8564693331718445,True,passed,0.326,

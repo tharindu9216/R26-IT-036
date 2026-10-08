@@ -1,0 +1,52 @@
+torch>=2.3
+transformers>=4.51,<6
+safetensors>=0.4
+streamlit>=1.40
+peft>=0.19,<1
+accelerate>=1.2,<2
+# Keep this on the 0.2 API used by emotion_chain/agent_graph.py. Newer pre-1.0
+# releases pull LangChain Core 1.x, which conflicts with the LangChain 0.3
+# packages commonly present in the project's Conda environment.
+langgraph>=0.2,<0.3
+pyyaml>=6.0,<7
+
+# C1 sensor (c1/, artifacts in ../model/c1) and the sparse branch of the
+# next-intensity forecaster (../model/forcast). The
+# scikit-learn range is narrow on purpose: best_baseline.joblib is a pickled
+# Pipeline, so a major-minor jump can refuse to unpickle it. Re-export the
+# artifact after widening it.
+numpy>=2.0,<3
+scipy>=1.14,<2
+scikit-learn>=1.6,<1.7
+pyserial>=3.5,<4
+
+# C3 stress + CBT ensembles (c3/, artifacts in ../model/c3)
+sentencepiece>=0.2
+
+# XAI (Integrated Gradients) for C1 sensor, C3 Stress/CBT (DeBERTa-v3 member
+# only), current emotion, and the next-intensity forecaster's frozen-RoBERTa
+# branch -- not used for reply generation.
+captum>=0.7,<1
+
+# React frontend API
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+python-multipart>=0.0.9,<1
+
+# Calling a ../node support server when remote_services points at one
+# (unused in the default all-local config).
+requests>=2.32,<3
+
+# Only needed when reply_generation.quantization is nf4 or int8, i.e. when the
+# 4B reply model has to fit a 4 GB laptop GPU. Not used by the bf16 default.
+bitsandbytes>=0.43; platform_system != "Darwin"
+
+# C2 voice path: browser audio decode + offline STT + ADV/appraisal + TTS.
+faster-whisper>=1.1,<2
+kokoro>=0.9.2,<1
+soundfile>=0.12,<1
+# pandas and joblib are also required by the text path: the next-intensity
+# forecaster's sparse branch is a joblib-pickled sklearn Pipeline fed a
+# one-row DataFrame, so neither can be dropped with the voice models.
+pandas>=2.2,<3
+joblib>=1.4,<2

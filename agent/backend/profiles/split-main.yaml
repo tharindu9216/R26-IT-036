@@ -1,0 +1,51 @@
+# Profile: main machine of the two-laptop split (the RTX 3050 4 GB laptop).
+#
+#   $env:AGENT_PROFILE = "split-main"
+#   uvicorn api:app --host 0.0.0.0 --port 8005
+#
+# The 4B reply model and the three voice models are answered by the support
+# node on the second laptop, which leaves this machine's 4 GB free for the
+# classifiers that cannot be offloaded (C3 + the emotion chain). Everything
+# not listed here is inherited from config.yaml unchanged.
+
+runtime_devices:
+  # The combined stress + CBT ensembles exceed the 6 GB GPU on the main
+  # laptop once the emotion models are resident. Keep them on CPU so both
+  # signals remain available instead of failing with CUDA OOM.
+  c3: cpu
+  # RoBERTa + the BiGRU forecaster are small; they share what C3 leaves.
+  emotion: cuda
+  # These four are irrelevant while the matching remote_services URL is set;
+  # they only take effect if you blank a URL to move that model back here.
+  qwen: auto
+  c2: cpu
+  stt: cpu
+  tts: cpu
+
+remote_services:
+  # Replace with the support node's LAN address (its run.ps1 prints it).
+  reply: http://192.168.8.109:8010
+  stt: http://192.168.8.109:8010
+  tts: http://192.168.8.109:8010
+  # C2 needs the backend's own c2.appraisal_stress package to unpickle its
+  # engine; leave it null unless the node has that folder too.
+  c2: null
+  timeout_seconds: 180
+  auth_token: null
+
+api:
+  cors_origins:
+    - http://localhost:5173
+    - http://127.0.0.1:5173
+    - http://localhost:4173
+    - http://127.0.0.1:4173
+    # Add this machine's own LAN address to open the UI from a phone/tablet:
+    # - http://192.168.1.30:5173
+
+reply_generation:
+  # Applies on the support node too -- the backend sends these values with
+  # every request, so the node's own reply.* entries are only fallbacks.
+  # Two exchanges keep the node's peak reserved VRAM at 3.40 GB on its 4 GB
+  # card. Drop to 1 if it still runs out. Was 4 when `history_turns` was
+  # applied as a message count; this is the same four replayed messages.
+  history_turns: 1
