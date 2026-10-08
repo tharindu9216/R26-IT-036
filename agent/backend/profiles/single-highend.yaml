@@ -1,0 +1,19 @@
+# Profile: one high-end machine (this project's RTX 3080 12 GB, or better).
+#
+#   $env:AGENT_PROFILE = "single-highend"
+#
+# Identical to plain config.yaml for the reply model -- bf16 Qwen on the GPU,
+# ~9.5 GB -- and additionally moves the classifiers onto the GPU, which the
+# 12 GB card has room for once Qwen has taken its 9.5 GB. Drop `c3: cuda`
+# first if you hit an out-of-memory error.
+
+runtime_devices:
+  c3: cuda
+  emotion: cuda
+  qwen: auto
+  c2: cpu
+  stt: cpu
+  tts: cpu
+
+reply_generation:
+  quantization: none

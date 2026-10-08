@@ -1,0 +1,10 @@
+streamlit>=1.32
+streamlit-autorefresh>=1.0.1
+numpy>=1.26
+pandas>=2.0
+scipy>=1.11
+# The saved sklearn estimators were serialized with this exact version.
+scikit-learn==1.6.1
+imbalanced-learn>=0.12
+torch>=2.2
+pyserial>=3.5

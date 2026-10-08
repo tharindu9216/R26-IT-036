@@ -15,6 +15,8 @@ import torch
 import torch.nn as nn
 from transformers import AutoModel, AutoTokenizer
 
+from .calibration import TemperatureCalibrator
+
 
 @dataclass
 class EnsembleMemberSpec:
@@ -83,6 +85,8 @@ class WeightedEnsemblePredictor:
         labels: dict[str, str],
         threshold: float = 0.5,
         device: str | torch.device | None = None,
+        preprocess_fn: Callable[[str, str], str] | None = None,
+        calibrator: TemperatureCalibrator | None = None,
     ):
         self._members = members
         self._model_factory = model_factory
@@ -90,6 +94,8 @@ class WeightedEnsemblePredictor:
         self._head_weight_key = head_weight_key
         self._labels = labels
         self._threshold = threshold
+        self._preprocess_fn = preprocess_fn
+        self._calibrator = calibrator
         self._device = torch.device(
             device or ("cuda" if torch.cuda.is_available() else "cpu")
         )
@@ -105,6 +111,20 @@ class WeightedEnsemblePredictor:
     @property
     def member_names(self) -> tuple[str, ...]:
         return tuple(member.name for member in self._members)
+
+    @property
+    def members(self) -> tuple[EnsembleMemberSpec, ...]:
+        return tuple(self._members)
+
+    @property
+    def decision_threshold(self) -> float:
+        if self._calibrator is not None:
+            return self._calibrator.calibrated_threshold
+        return self._threshold
+
+    @property
+    def calibration_summary(self) -> dict | None:
+        return self._calibrator.summary() if self._calibrator is not None else None
 
     def load(self) -> None:
         if self._loaded:
@@ -157,7 +177,20 @@ class WeightedEnsemblePredictor:
             device=self._device,
         )
 
-    def predict_proba(self, text: str) -> torch.Tensor:
+    def all_member_resources(self) -> tuple[EnsembleMemberResources, ...]:
+        """Return every loaded member in ensemble order for weighted XAI."""
+        return tuple(
+            self.member_resources(member.name)
+            for member in self._members
+        )
+
+    def preprocess(self, text: str, member_name: str) -> str:
+        """Apply the same member-specific preprocessing used for prediction."""
+        if self._preprocess_fn is None:
+            return text
+        return self._preprocess_fn(text, member_name)
+
+    def predict_proba_raw(self, text: str) -> torch.Tensor:
         # Models must be constructed outside inference mode. On-demand
         # Integrated Gradients reuses a loaded ensemble member and needs its
         # parameters to remain compatible with autograd. Creating the models
@@ -169,8 +202,9 @@ class WeightedEnsemblePredictor:
             for member in self._members:
                 tokenizer = self._loaded_tokenizers[member.name]
                 model = self._loaded_models[member.name]
+                model_text = self.preprocess(text, member.name)
                 encoded = tokenizer(
-                    text,
+                    model_text,
                     max_length=member.max_len,
                     padding="max_length",
                     truncation=True,
@@ -185,10 +219,64 @@ class WeightedEnsemblePredictor:
                 total = weighted if total is None else total + weighted
         return total
 
+    def predict_proba_many_raw(
+        self,
+        texts: list[str],
+        *,
+        batch_size: int = 8,
+    ) -> torch.Tensor:
+        """Efficient uncalibrated batch inference for offline evaluation."""
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
+        self.load()
+        total = torch.zeros((len(texts), 2), dtype=torch.float32)
+        with torch.inference_mode():
+            for member in self._members:
+                tokenizer = self._loaded_tokenizers[member.name]
+                model = self._loaded_models[member.name]
+                model_texts = [self.preprocess(text, member.name) for text in texts]
+                rows = []
+                for start in range(0, len(model_texts), batch_size):
+                    encoded = tokenizer(
+                        model_texts[start : start + batch_size],
+                        max_length=member.max_len,
+                        padding=True,
+                        truncation=True,
+                        return_tensors="pt",
+                    )
+                    input_ids = encoded["input_ids"].to(self._device)
+                    attention_mask = encoded["attention_mask"].to(self._device)
+                    logits = self._logits_fn(model, input_ids, attention_mask)
+                    rows.append(torch.softmax(logits, dim=1).detach().cpu())
+                if rows:
+                    total += torch.cat(rows, dim=0) * member.weight
+        return total
+
+    def _calibrate(self, probabilities: torch.Tensor) -> torch.Tensor:
+        if self._calibrator is None:
+            return probabilities
+        calibrated = self._calibrator.calibrate_distribution(
+            probabilities.detach().cpu().numpy()
+        )
+        return torch.tensor(calibrated, dtype=probabilities.dtype)
+
+    def predict_proba(self, text: str) -> torch.Tensor:
+        return self._calibrate(self.predict_proba_raw(text))
+
+    def predict_proba_many(
+        self,
+        texts: list[str],
+        *,
+        batch_size: int = 8,
+    ) -> torch.Tensor:
+        return self._calibrate(
+            self.predict_proba_many_raw(texts, batch_size=batch_size)
+        )
+
     def predict(self, text: str) -> EnsemblePrediction:
         probs = self.predict_proba(text)
         positive_prob = float(probs[1].item())
-        pred_idx = int(positive_prob >= self._threshold)
+        pred_idx = int(positive_prob >= self.decision_threshold)
         label = self._labels.get(str(pred_idx), str(pred_idx))
         confidence = positive_prob if pred_idx == 1 else 1.0 - positive_prob
         return EnsemblePrediction(

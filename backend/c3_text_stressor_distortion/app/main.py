@@ -34,7 +34,9 @@ def health():
         "status": "ok",
         "stress_model_loaded": stress_predictor.is_loaded,
         "stress_checkpoints": stress_predictor.checkpoint_paths,
+        "stress_calibration": stress_predictor.calibration,
         "cbt_model_loaded": cbt_predictor.is_loaded,
+        "cbt_calibration": cbt_predictor.calibration,
         "topic_model_loaded": topic_predictor.is_loaded,
     }
 
