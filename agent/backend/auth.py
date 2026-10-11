@@ -54,7 +54,7 @@ def protect_api(request: Request) -> None:
         return
     user = current_user(request)
     doctor_only = path.startswith('/api/doctor') or path in ('/api/xai', '/api/deployment') or path.startswith('/api/sensor/')
-    patient_only = path in ('/api/chat', '/api/chat/reset', '/api/voice/chat', '/api/questionnaire', '/api/auth/doctor')
+    patient_only = path in ('/api/chat', '/api/chat/reset', '/api/voice/chat', '/api/face/check', '/api/questionnaire', '/api/auth/doctor')
     if doctor_only and user['role'] != 'doctor':
         raise HTTPException(403, 'This page is available to doctors only.')
     if patient_only and user['role'] != 'patient':

@@ -159,6 +159,12 @@ export interface VoiceAppraisal {
   contributions: XAIAttribution[];
 }
 
+/** Whether the server can score camera frames; the UI only offers the camera when it can. */
+export interface FaceModelStatus {
+  available: boolean;
+  error: string | null;
+}
+
 export interface VoiceChatResponse extends ChatResponse {
   transcript: string;
   duration_seconds: number;

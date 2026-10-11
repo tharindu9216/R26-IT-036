@@ -131,6 +131,13 @@ API_CORS_ORIGINS: tuple[str, ...] = tuple(
     )
     if str(origin).strip()
 )
+# Load every model during startup instead of on first use; see config.yaml.
+_env_preload = os.getenv("AGENT_PRELOAD_MODELS")
+API_PRELOAD_MODELS: bool = (
+    _env_preload.strip().lower() not in {"0", "false", "no", "off", ""}
+    if _env_preload is not None
+    else bool(_raw.get("api", {}).get("preload_models", True))
+)
 
 
 def _model_path(*parts: str) -> Path:
@@ -148,6 +155,25 @@ C2_MODEL_DIR = _model_path(_raw["c2_voice"]["audeering_model_dir"])
 C2_APPRAISAL_ARTIFACT = _model_path(_raw["c2_voice"]["appraisal_artifact"])
 C2_MAX_UPLOAD_BYTES = int(_raw["c2_voice"].get("max_upload_mb", 25)) * 1024 * 1024
 C2_MAX_AUDIO_SECONDS = float(_raw["c2_voice"].get("max_audio_seconds", 180))
+
+# -- Facial stress (voice-mode camera) --
+# Read with .get() so a profile or config written before this section existed
+# still loads; the camera is then simply never offered.
+_facial_raw: dict = _raw.get("facial_stress") or {}
+FACIAL_CHECKPOINT = _model_path(
+    str(
+        _facial_raw.get(
+            "checkpoint",
+            "WorkStress3D_Trained_Model/workstress3d_facial_stress_cnn_v2.pth",
+        )
+    )
+)
+FACIAL_DEVICE = str(_facial_raw.get("device", "cpu"))
+FACIAL_THRESHOLD = float(_facial_raw.get("threshold", 0.5))
+FACIAL_MIN_FACE_FRAMES = int(_facial_raw.get("min_face_frames", 3))
+FACIAL_MAX_FRAMES = int(_facial_raw.get("max_frames", 40))
+FACIAL_MAX_FRAME_BYTES = int(_facial_raw.get("max_frame_kb", 300)) * 1024
+FACIAL_MIN_FACE_SIZE = int(_facial_raw.get("min_face_size", 60))
 
 # -- Offline voice I/O --
 STT_MODEL_DIR = _model_path(_raw["speech_to_text"]["model_dir"])
@@ -184,6 +210,7 @@ SIGNAL_INFLUENCE = InfluenceWeights(
     text=float(_influence_raw.get("text_weight", 1.0)),
     sensor=float(_influence_raw.get("sensor_weight", 1.0)),
     voice=float(_influence_raw.get("voice_weight", 1.0)),
+    face=float(_influence_raw.get("face_weight", 0.15)),
 )
 
 _multimodal_raw = _raw.get("multimodal_stress", {}) or {}

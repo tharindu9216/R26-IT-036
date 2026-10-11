@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch
 from fastapi.testclient import TestClient
 import api
 import auth
+import settings
 from accounts import AccountStore
 from chat_store import ChatStore
 
@@ -20,6 +21,7 @@ class PortalAccessTests(unittest.TestCase):
             (api, '_store', self.store), (api, '_turn_contexts', {}),
             (api, '_voice_audio_outputs', {}), (api, '_questionnaire_results', {}),
             (api, '_c1_service', None), (api, '_sensor_patient_id', None), (api, '_sensor_skipped', False),
+            (settings, 'API_PRELOAD_MODELS', False),
         ):
             patcher = patch.object(target, name, value)
             patcher.start()
@@ -151,6 +153,77 @@ class PortalAccessTests(unittest.TestCase):
         self.assertEqual(len(self.store.history(self.patient['id'])), 2)
         self.assertEqual(self.store.history(self.other['id']), [])
         self.assertEqual(self.store.transcript(self.patient['id'])[-1]['trace']['mode'], 'voice')
+
+    def test_voice_turn_scores_camera_frames_without_exposing_them(self):
+        from facial import aggregate_frame_probabilities
+
+        self.login()
+        appraisal = Mock(voice_stress_score=0.1, voice_stress=False, dominant_state='neutral', uncertain=False)
+        appraisal.as_dict.return_value = {'dominant_state': 'neutral'}
+        analyzer, transcriber, synthesizer, graph = Mock(), Mock(), Mock(), Mock()
+        analyzer.predict.return_value = appraisal
+        transcriber.transcribe.return_value = SimpleNamespace(text='Hello there', language='en', language_probability=1.0, duration_seconds=1.0)
+        synthesizer.synthesize.return_value = b'fake-wave'
+        graph.invoke.return_value = {'reply': 'Hello, I am here.', 'current_emotion': 'neutral'}
+        face = Mock()
+        face.predict_frames.return_value = aggregate_frame_probabilities(
+            [0.7, 0.8, 0.9], frames_received=4, min_face_frames=3, threshold=0.5)
+        c2_stub = SimpleNamespace(decode_audio=lambda _: SimpleNamespace(size=16000))
+        frames = [('face_frames', (f'f{i}.jpg', b'jpeg', 'image/jpeg')) for i in range(4)]
+        with patch.dict('sys.modules', {'c2': c2_stub}), patch.object(api, 'get_voice_services', return_value=(analyzer, transcriber, synthesizer)), patch.object(api, 'get_voice_workflow', return_value=graph), patch.object(api, 'get_facial_analyzer', return_value=face):
+            response = self.client.post('/api/voice/chat', files=[('audio', ('input.wav', b'input', 'audio/wav')), *frames])
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(face.predict_frames.call_args.args[0], [b'jpeg'] * 4)
+        state = graph.invoke.call_args.args[0]
+        self.assertTrue(state['face_stress_available'])
+        self.assertAlmostEqual(state['face_stress_probability'], 0.8)
+        self.assertEqual(state['face_frames_detected'], 3)
+        self.assertNotIn('face_stress_probability', response.json())
+
+    def test_typed_turn_scores_camera_frames_without_exposing_them(self):
+        from facial import aggregate_frame_probabilities
+
+        self.login()
+        graph = Mock()
+        graph.invoke.return_value = {'reply': 'I am here with you.', 'current_emotion': 'sadness'}
+        face = Mock()
+        face.predict_frames.return_value = aggregate_frame_probabilities(
+            [0.7, 0.8, 0.9], frames_received=4, min_face_frames=3, threshold=0.5)
+        frames = [('face_frames', (f'f{i}.jpg', b'jpeg', 'image/jpeg')) for i in range(4)]
+        with patch.object(api, 'get_workflow', return_value=graph), patch.object(api, 'get_facial_analyzer', return_value=face):
+            response = self.client.post('/api/chat/face', data={'message': 'I feel low'}, files=frames)
+            plain = self.client.post('/api/chat', json={'message': 'still low'})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(face.predict_frames.call_args.args[0], [b'jpeg'] * 4)
+        state = graph.invoke.call_args_list[0].args[0]
+        self.assertEqual(state['user_text'], 'I feel low')
+        self.assertTrue(state['face_stress_available'])
+        self.assertAlmostEqual(state['face_stress_probability'], 0.8)
+        self.assertNotIn('face_stress_probability', response.json())
+        # The JSON route still works and simply has no camera reading.
+        self.assertEqual(plain.status_code, 200, plain.text)
+        self.assertFalse(graph.invoke.call_args_list[1].args[0]['face_stress_available'])
+        trace = self.store.transcript(self.patient['id'])[1]['trace']
+        self.assertEqual(trace['mode'], 'text')
+        self.assertIn('face', [step['key'] for step in trace['steps']])
+
+    def test_voice_turn_without_camera_is_no_reading(self):
+        state, context = api._facial_turn_data([])
+        self.assertFalse(state['face_stress_available'])
+        self.assertEqual(state['face_stress_reason'], 'the camera was off for this turn')
+        self.assertFalse(context['facial_stress']['available'])
+
+    def test_face_check_is_patient_only(self):
+        face = Mock()
+        face.detect_face.return_value = True
+        with patch.object(api, 'get_facial_analyzer', return_value=face):
+            self.login(self.doctor)
+            frame = {'frame': ('f.jpg', b'jpeg', 'image/jpeg')}
+            self.assertEqual(self.client.post('/api/face/check', files=frame).status_code, 403)
+            self.login()
+            response = self.client.post('/api/face/check', files=frame)
+            self.assertEqual(response.json(), {'face_detected': True})
+            self.assertEqual(self.client.post('/api/face/check', files={'frame': ('a.wav', b'x', 'audio/wav')}).status_code, 400)
 
     def test_turn_audio_and_xai_require_patient_access(self):
         api._turn_contexts['turn'] = {'patient_id': self.patient['id'], 'message': 'hello'}

@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { ChatMessage } from "../types";
+import { CameraConsent, FacePreview } from "./FaceCamera";
 import { SupportContacts } from "./SupportContacts";
+import { useFaceCamera } from "./useFaceCamera";
 import { VoiceWaveMessage } from "./VoiceWaveMessage";
 
 
@@ -28,6 +30,7 @@ export function VoiceChat() {
   const chunksRef = useRef<Blob[]>([]);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const localAudioUrlsRef = useRef<string[]>([]);
+  const camera = useFaceCamera(recording || sending);
 
 
 
@@ -55,13 +58,13 @@ export function VoiceChat() {
     return () => { active = false; };
   }, []);
 
-  async function submitAudio(audio: Blob, filename: string) {
+  async function submitAudio(audio: Blob, filename: string, faceFrames: Blob[] = []) {
     if (sending || audio.size === 0) return;
     setSending(true);
     setError(null);
     const localAudioUrl = URL.createObjectURL(audio);
     try {
-      const result = await api.sendVoice(audio, filename);
+      const result = await api.sendVoice(audio, filename, faceFrames);
 
       localAudioUrlsRef.current.push(localAudioUrl);
       setMessages((previous) => [
@@ -113,15 +116,17 @@ export function VoiceChat() {
       };
       recorder.onerror = () => setError("Microphone recording failed.");
       recorder.onstop = () => {
+        const faceFrames = camera.endCapture();
         const actualMime = recorder.mimeType || mimeType || "audio/webm";
         const blob = new Blob(chunksRef.current, { type: actualMime });
         stream.getTracks().forEach((track) => track.stop());
         streamRef.current = null;
         recorderRef.current = null;
         setRecording(false);
-        void submitAudio(blob, `voice-input.${extensionForMime(actualMime)}`);
+        void submitAudio(blob, `voice-input.${extensionForMime(actualMime)}`, faceFrames);
       };
       recorder.start(250);
+      camera.beginCapture();
       setRecording(true);
     } catch (caught) {
       streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -134,6 +139,21 @@ export function VoiceChat() {
     if (recorderRef.current?.state === "recording") recorderRef.current.stop();
   }
 
+  async function handleNewChat() {
+    if (recording || sending) return;
+    setError(null);
+    try {
+      await api.resetChat();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      return;
+    }
+    // The recordings of the forgotten turns are no longer on screen.
+    localAudioUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+    localAudioUrlsRef.current = [];
+    setMessages([]);
+  }
+
   return (
     <div className="card chat-card voice-chat-card">
       <div className="chat-header">
@@ -143,6 +163,18 @@ export function VoiceChat() {
             <h2>Voice check-in</h2>
             <span className="online-status"><i /> Listening when you’re ready</span>
           </div>
+        </div>
+        <div className="chat-header-actions">
+          <FacePreview camera={camera} />
+          <button
+            type="button"
+            className="new-chat-button"
+            onClick={handleNewChat}
+            disabled={recording || sending || messages.length === 0}
+            title="Forget this conversation and start a new one"
+          >
+            New chat
+          </button>
         </div>
       </div>
       <div className="chat-log">
@@ -180,6 +212,7 @@ export function VoiceChat() {
         <div ref={bottomRef} />
       </div>
       {error && <p className="error">{error}</p>}
+      {camera.error && <p className="camera-error">{camera.error}</p>}
       <div className="voice-controls">
         <button
           className={recording ? "record-button recording" : "record-button"}
@@ -204,6 +237,7 @@ export function VoiceChat() {
         </label>
       </div>
       {recording && <p className="recording-status">Recording… speak naturally, then press Stop &amp; send.</p>}
+      <CameraConsent camera={camera} />
     </div>
   );
 }

@@ -3,6 +3,7 @@ import type {
   PatientSummary,
   ChatMessage,
   ChatResponse,
+  FaceModelStatus,
   QuestionnaireStatus,
   SensorStatus,
   TextModelStatus,
@@ -103,21 +104,38 @@ export const api = {
     request<ChatMessage[]>(
       `/chat/history?session_id=${encodeURIComponent(sessionId())}`,
     ),
-  sendChat: (message: string) =>
-    request<ChatResponse>("/chat", {
-      method: "POST",
-      body: JSON.stringify({ message, session_id: sessionId() }),
-    }),
+  sendChat: (message: string, faceFrames: Blob[] = []) => {
+    if (faceFrames.length === 0) {
+      return request<ChatResponse>("/chat", {
+        method: "POST",
+        body: JSON.stringify({ message, session_id: sessionId() }),
+      });
+    }
+    const form = new FormData();
+    form.append("message", message);
+    form.append("session_id", sessionId());
+    // Webcam stills captured while the user typed; scored and discarded server-side.
+    faceFrames.forEach((frame, index) => form.append("face_frames", frame, `face-${index}.jpg`));
+    return requestForm<ChatResponse>("/chat/face", form);
+  },
   resetChat: () =>
     request<{ ok: boolean }>("/chat/reset", {
       method: "POST",
       body: JSON.stringify({ session_id: sessionId() }),
     }),
-  sendVoice: (audio: Blob, filename = "voice-input.webm") => {
+  sendVoice: (audio: Blob, filename = "voice-input.webm", faceFrames: Blob[] = []) => {
     const form = new FormData();
     form.append("audio", audio, filename);
     form.append("session_id", sessionId());
+    // Webcam stills captured while the user spoke; scored and discarded server-side.
+    faceFrames.forEach((frame, index) => form.append("face_frames", frame, `face-${index}.jpg`));
     return requestForm<VoiceChatResponse>("/voice/chat", form);
+  },
+  faceModelStatus: () => request<FaceModelStatus>("/models/face/status"),
+  faceCheck: (frame: Blob) => {
+    const form = new FormData();
+    form.append("frame", frame, "preview.jpg");
+    return requestForm<{ face_detected: boolean }>("/face/check", form);
   },
   explainChat: (message: string, turnId: string) =>
     request<XAIResponse>("/xai", {

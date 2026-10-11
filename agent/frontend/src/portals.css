@@ -1,7 +1,7 @@
 .portal-brand { text-decoration: none; }
 .portal-brand .brand-mark { font: 32px Georgia, serif; }
 .portal-account { display: flex; align-items: center; gap: 16px; }
-.portal-account button, .patient-portal button:not(.mode-card):not(.record-button), .doctor-portal button, .login-card button, .portal-panel > button {
+.portal-account button, .patient-portal button:not(.mode-card):not(.record-button):not(.camera-ui), .doctor-portal button, .login-card button, .portal-panel > button {
   border: 1px solid var(--border-strong); border-radius: 12px; padding: 10px 18px;
   background: var(--surface-solid); color: var(--sage-dark); cursor: pointer;
 }

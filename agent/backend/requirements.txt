@@ -23,6 +23,12 @@ pyserial>=3.5,<4
 # C3 stress + CBT ensembles (c3/, artifacts in ../model/c3)
 sentencepiece>=0.2
 
+# Facial stress (facial/, ../model/WorkStress3D_Trained_Model): the Haar face
+# detector the model was trained behind, and the frame decoding. Headless, so
+# no GUI libraries; the cascade XML ships inside the wheel (~40 MB).
+opencv-python-headless>=4.9,<5
+pillow>=10
+
 # XAI (Integrated Gradients) for C1 sensor, C3 Stress/CBT (DeBERTa-v3 member
 # only), current emotion, and the next-intensity forecaster's frozen-RoBERTa
 # branch -- not used for reply generation.

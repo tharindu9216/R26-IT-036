@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import torch
@@ -24,6 +24,12 @@ from .fusion import (
     InfluenceWeights,
     weighted_influence,
 )
+from .scope import (
+    detect_out_of_scope,
+    out_of_scope_reply,
+    reply_contains_code,
+    scope_directive,
+)
 from .support_contacts import (
     DEFAULT_SUPPORT_CONTACTS,
     SupportContact,
@@ -32,11 +38,23 @@ from .support_contacts import (
 )
 
 
+# Shared by both prompts. Qwen is a general instruction model and will happily
+# write code or homework unless told this companion does not; scope.py adds a
+# per-turn directive and filters code out of the reply on top of this.
+SCOPE_RULES = """You only offer emotional support and everyday conversation
+about the user's feelings, wellbeing and life. You do not write or fix code,
+solve maths or homework, translate, write essays, emails or other documents,
+or act as a general assistant or search engine. If asked for any of these,
+gently say it is not something you can help with here and turn back to how
+the user is feeling. Never include code in a reply."""
+
 BASE_SYSTEM_PROMPT = """You are a warm, concise conversational companion.
 Respond naturally to the user's latest message. Do not diagnose mental-health
 conditions, claim to be a therapist, or invent facts. Ask at most one useful
 follow-up question. Never write a phone number or the name of a helpline: the
-application appends verified contact details itself when they are needed."""
+application appends verified contact details itself when they are needed.
+
+""" + SCOPE_RULES
 
 SUPPORTIVE_SYSTEM_PROMPT = """You are a supportive emotional-support companion.
 Respond in 3-4 sentences: acknowledge the user's feeling, briefly reflect back
@@ -44,7 +62,9 @@ what you heard, offer one concrete and realistic next step, then ask one gentle
 follow-up question. Be warm, specific and non-judgmental. Do not diagnose,
 shame, lecture, or claim to replace professional care. Never write a phone
 number or the name of a helpline: the application appends verified contact
-details itself when they are needed."""
+details itself when they are needed.
+
+""" + SCOPE_RULES
 
 INFLUENCE_PREAMBLE = (
     "Stress evidence for this turn, and how much each source should influence "
@@ -98,10 +118,21 @@ class ReplySignals:
     multimodal_stress_probability: float | None = None
     voice_appraisal_state: str | None = None
     voice_appraisal_uncertain: bool = False
+    # Voice- and text-mode camera (facial/). Wording evidence only: it is deliberately
+    # absent from routing and escalation, because the model behind it is the
+    # least validated source. None probability means no reading this turn.
+    face_stress: bool = False
+    face_stress_probability: float | None = None
+    face_frames_detected: int = 0
     # Raw per-header probabilities are kept for logging/UI display.
     stress_probability: float | None = None
     cbt_probability: float | None = None
     safety_status: str = "normal"
+    # Task category from scope.detect_out_of_scope, filled in by the graph's
+    # scope node. Left unset by callers that skip the graph (app.py, cli.py),
+    # in which case generate() runs the same check itself.
+    scope_checked: bool = False
+    out_of_scope_category: str | None = None
 
 
 @dataclass(frozen=True)
@@ -111,6 +142,8 @@ class ReplyGenerationResult:
     source: str
     # Contacts appended to ``text``; empty unless the turn was escalated.
     support_contacts: tuple[SupportContact, ...] = ()
+    # Off-topic task the user asked for (scope.py), or None when in scope.
+    out_of_scope_category: str | None = None
 
     @property
     def escalated(self) -> bool:
@@ -309,6 +342,17 @@ class QwenReplyGenerator:
             if signals.multimodal_stress_available
             else raw_sources
         )
+        # The face is not part of the questionnaire+wearable combination, so
+        # it is listed on its own whichever branch was taken above.
+        sources += (
+            (
+                "facial expression (camera; low-reliability model)",
+                weights.face,
+                signals.face_stress,
+                signals.face_stress_probability,
+                f" [face seen in {signals.face_frames_detected} frames]",
+            ),
+        )
         lines = []
         for name, weight, flagged, probability, extra in sources:
             influence = weighted_influence(
@@ -326,10 +370,13 @@ class QwenReplyGenerator:
         signals: ReplySignals,
         route: str,
         history: Sequence[tuple[str, str]],
+        out_of_scope_category: str | None = None,
     ) -> list[dict[str, str]]:
         system_prompt = (
             SUPPORTIVE_SYSTEM_PROMPT if route == "supportive_adapter" else BASE_SYSTEM_PROMPT
         )
+        if out_of_scope_category is not None:
+            system_prompt += "\n\n" + scope_directive(out_of_scope_category)
         signal_summary = (
             "Internal context (do not quote scores or labels to the user): "
             f"current emotion={signals.current_emotion}; "
@@ -389,9 +436,16 @@ class QwenReplyGenerator:
             next_emotion_confidence=signals.next_emotion_confidence,
             next_negative_min_confidence=signals.next_negative_min_confidence,
         )
+        out_of_scope = (
+            signals.out_of_scope_category
+            if signals.scope_checked
+            else detect_out_of_scope(user_text)
+        )
         try:
             self.load()
-            result = self._generate_model_reply(user_text, signals, route, history)
+            result = self._generate_model_reply(
+                user_text, signals, route, history, out_of_scope
+            )
         except Exception as exc:
             if not self.allow_template_fallback:
                 raise
@@ -406,11 +460,37 @@ class QwenReplyGenerator:
                 self.remote_url or self.base_model_dir,
             )
             result = ReplyGenerationResult(
-                text=self._fallback_reply(user_text, route),
+                text=(
+                    out_of_scope_reply(out_of_scope)
+                    if out_of_scope is not None
+                    else self._fallback_reply(user_text, route)
+                ),
                 route=route,
                 source="template_fallback",
             )
+        result = self._enforce_scope(result, out_of_scope)
         return self._escalate(result, signals)
+
+    @staticmethod
+    def _enforce_scope(
+        result: ReplyGenerationResult, out_of_scope: str | None
+    ) -> ReplyGenerationResult:
+        """Replace a reply that did the off-topic task anyway.
+
+        Code is never a valid answer from this companion, so the check runs on
+        every reply, not only on turns the input screen flagged: a request the
+        patterns missed is still caught here.
+        """
+
+        if not reply_contains_code(result.text):
+            return replace(result, out_of_scope_category=out_of_scope)
+        LOGGER.info("Reply contained code; replaced with the out-of-scope reply")
+        return ReplyGenerationResult(
+            text=out_of_scope_reply(out_of_scope or "coding"),
+            route=result.route,
+            source="scope_template",
+            out_of_scope_category=out_of_scope or "coding",
+        )
 
     def _escalate(
         self, result: ReplyGenerationResult, signals: ReplySignals
@@ -446,6 +526,7 @@ class QwenReplyGenerator:
             route=result.route,
             source=result.source,
             support_contacts=self.support_contacts,
+            out_of_scope_category=result.out_of_scope_category,
         )
 
     def _generate_model_reply(
@@ -454,8 +535,11 @@ class QwenReplyGenerator:
         signals: ReplySignals,
         route: str,
         history: Sequence[tuple[str, str]],
+        out_of_scope_category: str | None = None,
     ) -> ReplyGenerationResult:
-        messages = self._messages(user_text, signals, route, history)
+        messages = self._messages(
+            user_text, signals, route, history, out_of_scope_category
+        )
         # `route` stays the routing decision (and picks the prompt above);
         # this flag only decides whether the LoRA weights are active for it.
         adapter_active = route == "supportive_adapter" and self.use_adapter

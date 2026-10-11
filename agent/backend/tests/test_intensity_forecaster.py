@@ -1,6 +1,8 @@
 """The exported next-intensity hybrid, loaded and scored as the app loads it.
 
-These run against the real artifacts in ``model/forcast``.
+These run against the real artifact directory the app loads (config.yaml
+``next_intensity``); the validation split comes from the ``model/forcast``
+training tree.
 The threshold and blend weights were selected on the validation split during
 training, so the point of the parity test is narrow but important: the backend
 recomputes the current-emotion probabilities and the frozen embeddings at
@@ -18,6 +20,7 @@ from pathlib import Path
 
 import torch
 
+import settings
 from emotion_chain.core import CURRENT_EMOTIONS, INTENSITY_LABELS, allowed_next_states
 from emotion_chain.pipeline import (
     CurrentEmotionClassifier,
@@ -27,8 +30,8 @@ from emotion_chain.pipeline import (
 
 REPOSITORY_DIR = Path(__file__).resolve().parents[2]
 MODEL_DIR = REPOSITORY_DIR / "model"
-FORECAST_DIR = MODEL_DIR / "forcast"
-VALID_CSV = FORECAST_DIR / "final_datasets" / "valid.csv"
+FORECAST_DIR = Path(settings.NEXT_INTENSITY_DIR)
+VALID_CSV = MODEL_DIR / "forcast" / "final_datasets" / "valid.csv"
 
 
 def _stored_prediction(row: dict[str, str]) -> EmotionPrediction:

@@ -23,7 +23,7 @@ model_root: ../model
 # variable overrides this line for a single run:
 #   $env:AGENT_PROFILE = "single-4gb"; uvicorn api:app --port 8005
 # See ../DEPLOYMENT.md.
-profile: split-main
+profile: single-4gb
 
 # Runtime placement. Keeping the five C3 encoders and the emotion chain's
 # RoBERTa on CPU leaves GPU memory available for the 4B reply model.
@@ -58,6 +58,12 @@ remote_services:
 # Browser origins allowed to call api.py. Add the LAN address the React app is
 # served from when the UI is opened from another device on the network.
 api:
+  # Load every model (C1, C3, emotion chain, Qwen, Whisper, C2, Kokoro, face)
+  # while uvicorn starts, so "Application startup complete" means the first
+  # turn is served without a load pause. Startup takes longer, and with
+  # `--reload` every code change reloads them all. The AGENT_PRELOAD_MODELS
+  # environment variable (0/1) overrides this for a single run.
+  preload_models: true
   cors_origins:
     - http://localhost:5173
     - http://127.0.0.1:5173
@@ -82,6 +88,24 @@ c2_voice:
   appraisal_artifact: c2/appraisal/advanced_appraisal_engine.joblib
   max_upload_mb: 25
   max_audio_seconds: 180
+
+# Facial stress -- voice- and text-mode camera frames scored by the WorkStress3D
+# FacialStressCNN (48x48 grayscale face crops). The model is weak (5-fold CV
+# accuracy 0.63, ROC-AUC 0.68, specificity 0.53 on only 83 faces) and reads a
+# face-less gray frame as ~95% stress, so: frames with no detected face are
+# dropped, the turn needs `min_face_frames` faces before it reports at all,
+# and its pull on the reply is capped low by signal_influence.face_weight.
+# It is reply-wording evidence only -- it never selects a route or escalates.
+facial_stress:
+  checkpoint: WorkStress3D_Trained_Model/workstress3d_facial_stress_cnn_v2.pth
+  device: cpu
+  threshold: 0.5
+  min_face_frames: 3
+  # Frames sent with one voice turn; extras are thinned evenly across it.
+  max_frames: 40
+  max_frame_kb: 300
+  # Smallest face, in pixels of the uploaded frame, the detector accepts.
+  min_face_size: 60
 
 # Offline speech-to-text used before emotion-chain inference.
 speech_to_text:
@@ -143,11 +167,13 @@ routing:
 #
 # Text is what the user actually wrote, so it stays primary. C1 reads one
 # noisy 60-second window and C2 one appraisal frame, so both are secondary and
-# can be wrong; they are down-weighted accordingly.
+# can be wrong; they are down-weighted accordingly. The facial camera model is
+# the least validated of all (see facial_stress above), so it is the lowest.
 signal_influence:
   text_weight: 1.0
   sensor_weight: 0.3
   voice_weight: 0.6
+  face_weight: 0.15
 
 # Decision-level fusion used by the stress badge and both conversation paths.
 # Voice appraisal remains a separate C2 signal; the shared stress score is the
@@ -188,14 +214,15 @@ current_emotion:
 # over frozen embeddings from the current-emotion RoBERTa. Blend weights and
 # the decision threshold live in the artifact's own metadata.json (validation-
 # selected; nothing is retuned at load time), so this stays a directory.
-# Its root metadata.json points to the trained artifacts under model_train/.
+# It is the self-contained export written by model/forcast/export_deployment.py;
+# model/forcast itself is the training tree and has no root metadata.json.
 #
 # It replaces the 13-label next-emotion forecaster that predicted the next
 # *family*. This one does not: the family is carried over from the current
 # emotion and only the intensity is predicted, so `neutral` turns keep
 # `neutral` as their next state. See backend/README.md.
 next_intensity:
-  artifact_dir: forcast
+  artifact_dir: next_intensity_forecaster
 
 # Reply generation: Qwen base model + the ESConv LoRA adapter, and the
 # generation settings used for every reply regardless of route.

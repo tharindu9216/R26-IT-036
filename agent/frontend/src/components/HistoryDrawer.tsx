@@ -38,6 +38,10 @@ const FRIENDLY_STAGES: Record<string, { title: string; description: string }> = 
     title: "Immediate safety check",
     description: "A first check for language that needs an immediate safety response.",
   },
+  scope: {
+    title: "Scope check",
+    description: "Whether the message asks for something outside emotional support, such as code or homework.",
+  },
   sensor: {
     title: "Body and check-in signals",
     description: "The saved questionnaire and wearable readings form the stress score used for this message.",
