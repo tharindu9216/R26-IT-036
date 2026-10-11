@@ -266,3 +266,8 @@ chat_history:
   # exchanges ever reach the prompt; this bounds the file, and leaves enough
   # behind it for /api/chat/history to redraw the conversation after a reload.
   max_messages: 200
+  # The doctor's weekly summary needs more than a day of history, so each turn
+  # also stores its numbers -- stress readings, emotion label, safety flags, no
+  # message text -- for this many days. They survive New chat and the TTL
+  # above. 0 keeps them forever.
+  metrics_retention_days: 90

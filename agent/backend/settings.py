@@ -278,3 +278,6 @@ _chat_history = _raw.get("chat_history", {}) or {}
 CHAT_DB_PATH = BACKEND_DIR / str(_chat_history.get("db_file", "chat_sessions.db"))
 CHAT_HISTORY_TTL_SECONDS = float(_chat_history.get("ttl_seconds", 86_400))
 CHAT_HISTORY_MAX_MESSAGES = int(_chat_history.get("max_messages", 200))
+# The doctor summary's per-turn numbers outlive the chat itself; see
+# wellbeing_summary.py. 0 keeps them forever.
+CHAT_METRICS_RETENTION_DAYS = float(_chat_history.get("metrics_retention_days", 90))

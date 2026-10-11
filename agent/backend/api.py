@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import pickle
 import threading
 import time
 import uuid
@@ -42,6 +43,7 @@ from emotion_chain.multimodal_stress import (
 from emotion_chain.reply_generator import QwenReplyGenerator
 from emotion_chain.support_contacts import speakable
 from emotion_chain.trace import build_trace
+from wellbeing_summary import summarize, turn_metrics
 
 logging.basicConfig(level=logging.INFO)
 services.log_deployment_summary()
@@ -988,6 +990,10 @@ def _remember_turn_messages(
     _store.append(session_id, "user", user_text)
     _store.append(session_id, "assistant", result["reply"], trace=trace)
     _store.set_previous_emotion(session_id, result.get("current_emotion"))
+    if trace and trace.get("turn_id"):
+        _store.record_metrics(
+            trace["turn_id"], session_id, turn_metrics(result, str(trace.get("mode", "text")))
+        )
 
 
 def _deviation_payload(result: dict) -> dict:
@@ -1000,10 +1006,53 @@ def _deviation_payload(result: dict) -> dict:
 
 
 def _remember_turn(turn_id: str, context: dict) -> None:
+    """Keep what this turn's XAI needs, in memory and in the chat store.
+
+    The in-memory dict is a cache of recent turns; the store is what lets
+    "Explain predictions" work for older turns and after a backend restart.
+    """
+
     with _turn_context_lock:
         _turn_contexts[turn_id] = context
         while len(_turn_contexts) > 50:
             _turn_contexts.pop(next(iter(_turn_contexts)))
+    # The C1 predictor is the shared process-wide model, not turn data; it is
+    # reattached on load. Everything else is plain dataclasses and arrays.
+    stored = {**context, "sensor_predictor": None}
+    try:
+        _store.save_turn_context(
+            turn_id, context["patient_id"], pickle.dumps(stored, pickle.HIGHEST_PROTOCOL)
+        )
+    except Exception as exc:
+        LOGGER.warning("Could not save the XAI context for turn %s: %s", turn_id, exc)
+
+
+def _turn_context(turn_id: str) -> dict | None:
+    """A turn's XAI context: the memory cache first, then the chat store.
+
+    Only this app writes the store (a local SQLite file next to config.yaml),
+    which is why unpickling it is acceptable.
+    """
+
+    with _turn_context_lock:
+        context = _turn_contexts.get(turn_id)
+    if context is not None:
+        return context
+    row = _store.turn_context(turn_id)
+    if row is None:
+        return None
+    try:
+        context = pickle.loads(row[1])
+    except Exception as exc:
+        LOGGER.warning("Stored XAI context for turn %s is unreadable: %s", turn_id, exc)
+        return None
+    if context.get("sensor_predictions"):
+        context["sensor_predictor"] = get_c1_predictor()
+    with _turn_context_lock:
+        _turn_contexts[turn_id] = context
+        while len(_turn_contexts) > 50:
+            _turn_contexts.pop(next(iter(_turn_contexts)))
+    return context
 
 
 @app.post("/api/chat")
@@ -1466,8 +1515,7 @@ def explain_chat(payload: XAIRequest, request: Request) -> dict:
 
     turn_context = None
     if payload.turn_id:
-        with _turn_context_lock:
-            turn_context = _turn_contexts.get(payload.turn_id)
+        turn_context = _turn_context(payload.turn_id)
         if turn_context is None:
             raise HTTPException(status_code=404, detail="Explanation context expired")
         if turn_context["message"] != text:
@@ -1672,8 +1720,7 @@ def _claim_sensor(request: Request) -> None:
 
 
 def _authorized_turn(turn_id: str, user: dict) -> dict:
-    with _turn_context_lock:
-        context = _turn_contexts.get(turn_id)
+    context = _turn_context(turn_id)
     if not context or not accounts.can_access(user, context.get("patient_id", "")):
         raise HTTPException(404, "This turn is unavailable or its explanation has expired.")
     return context
@@ -1696,12 +1743,32 @@ def doctor_patients(request: Request) -> list[dict]:
     return result
 
 
+@app.get("/api/doctor/summary")
+def doctor_summary(request: Request, days: int = 7) -> dict:
+    """Stress, emotion and safety trends for one linked patient over ``days``.
+
+    Built from the per-turn numbers in ``turn_metrics`` rather than the chat
+    transcript, which only lives for a day. Also covers the period before, so
+    the view can say whether things got better or worse.
+    """
+
+    if not 1 <= days <= 90:
+        raise HTTPException(status_code=400, detail="days must be between 1 and 90")
+    target = patient_id(request)
+    _store.purge_metrics(settings.CHAT_METRICS_RETENTION_DAYS * 86_400)
+    # Two periods back, plus a day of slack for the local-midnight boundary.
+    since = time.time() - (2 * days + 1) * 86_400
+    return summarize(_store.metrics(target, since), days=days)
+
+
 @app.get("/api/doctor/activity")
 def doctor_activity(request: Request) -> list[dict]:
     _store.purge_expired()
-    messages = _store.transcript(patient_id(request))
+    target = patient_id(request)
+    messages = _store.transcript(target)
+    available = _store.turn_context_ids(target)
     with _turn_context_lock:
-        available = set(_turn_contexts)
+        available |= set(_turn_contexts)
     for message in messages:
         turn_id = (message.get("trace") or {}).get("turn_id")
         message["explanation_available"] = bool(turn_id and turn_id in available)

@@ -115,6 +115,31 @@ class PortalAccessTests(unittest.TestCase):
         self.assertEqual(self.client.post('/api/chat/reset', json={}).status_code, 403)
         self.assertEqual(self.client.post('/api/questionnaire', json={'answers': {}}).status_code, 403)
 
+    def test_doctor_summary_covers_linked_patients_only(self):
+        headers = self.link()
+        self.login()
+        graph = Mock()
+        graph.invoke.return_value = {
+            'reply': 'I hear you.', 'current_emotion': 'sadness', 'text_signal_probability': 0.7,
+            'multimodal_stress_available': True, 'multimodal_stress_probability': 0.6,
+        }
+        with patch.object(api, 'get_workflow', return_value=graph):
+            self.assertEqual(self.client.post('/api/chat', json={'message': 'rough day'}).status_code, 200)
+            # Patients can never post a camera turn as a doctor, or vice versa.
+            self.assertEqual(self.client.get('/api/doctor/summary').status_code, 403)
+        self.client.post('/api/chat/reset', json={})
+        self.login(self.doctor)
+        self.assertEqual(self.client.post('/api/chat/face', data={'message': 'hi'}, headers=headers).status_code, 403)
+        summary = self.client.get('/api/doctor/summary?days=7', headers=headers)
+        self.assertEqual(summary.status_code, 200, summary.text)
+        body = summary.json()
+        # New chat cleared the conversation but not the wellbeing history.
+        self.assertEqual(body['totals']['check_ins'], 1)
+        self.assertEqual(body['emotions'][0]['label'], 'sadness')
+        self.assertEqual({s['key']: s['average'] for s in body['sources']}['text'], 0.7)
+        self.assertEqual(self.client.get('/api/doctor/summary', headers={'X-Patient-ID': self.other['id']}).status_code, 403)
+        self.assertEqual(self.client.get('/api/doctor/summary?days=400', headers=headers).status_code, 400)
+
     def test_text_reply_redacts_analysis_but_doctor_activity_keeps_trace(self):
         self.link()
         self.login()
@@ -132,6 +157,13 @@ class PortalAccessTests(unittest.TestCase):
         activity = self.client.get('/api/doctor/activity', headers={'X-Patient-ID': self.patient['id']}).json()
         self.assertEqual(activity[-1]['trace']['route'], 'supportive')
         self.assertTrue(activity[-1]['explanation_available'])
+        # A backend restart empties the in-memory cache; the stored context
+        # keeps the explanation available.
+        api._turn_contexts.clear()
+        activity = self.client.get('/api/doctor/activity', headers={'X-Patient-ID': self.patient['id']}).json()
+        self.assertTrue(activity[-1]['explanation_available'])
+        restored = api._turn_context(result.json()['turn_id'])
+        self.assertEqual((restored['message'], restored['patient_id']), ('I feel tired', self.patient['id']))
 
     def test_voice_reply_uses_account_and_redacts_analysis(self):
         self.login()

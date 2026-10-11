@@ -9,6 +9,7 @@ import type {
   TextModelStatus,
   VoiceModelStatus,
   VoiceChatResponse,
+  WellbeingSummary,
   XAIResponse,
 } from "./types";
 
@@ -66,6 +67,7 @@ export const api = {
   unlinkDoctor: () => request<{ ok: boolean }>("/auth/doctor", { method: "DELETE" }),
   patients: () => request<PatientSummary[]>("/doctor/patients"),
   activity: () => request<ChatMessage[]>("/doctor/activity"),
+  wellbeingSummary: (days: number) => request<WellbeingSummary>(`/doctor/summary?days=${days}`),
   health: () => request<{ ok: boolean }>("/health"),
   textModelStatus: () => request<TextModelStatus>("/models/text/status"),
   prepareTextModels: () =>
