@@ -125,6 +125,31 @@ def _safety_step(state: dict) -> dict[str, Any]:
     )
 
 
+def _scope_step(state: dict) -> dict[str, Any]:
+    title = (
+        "Whether the message asks for a task outside emotional support "
+        "(code, homework, translation, documents)"
+    )
+    status = state.get("scope_status")
+    if status is None:
+        return _step("scope", "Scope screen", title, status="skipped", summary="not reached")
+    if status == "in_scope":
+        return _step("scope", "Scope screen", title, summary="in scope")
+    category = state.get("out_of_scope_category")
+    return _step(
+        "scope",
+        "Scope screen",
+        title,
+        summary="out of scope",
+        detail=(
+            "The emotion models still ran, but the reply was told not to do the "
+            "task and to turn back to how the user is feeling. Any reply that "
+            "still contains code is replaced by a fixed one."
+        ),
+        outputs=[_output("task", category)],
+    )
+
+
 def _sensor_step(state: dict) -> dict[str, Any]:
     # Present the wearable and questionnaire fusion as the shared stress row.
     # The raw wearable value remains visible as an input, while the row's
@@ -200,6 +225,47 @@ def _voice_steps(state: dict, mode: str) -> list[dict[str, Any]]:
             outputs=[
                 _output("appraisal state", state.get("voice_appraisal_state")),
                 _output("stress score", _percent(state.get("voice_stress_score"))),
+            ],
+        )
+    ]
+
+
+def _face_steps(state: dict, mode: str) -> list[dict[str, Any]]:
+    """The camera's facial-stress reading, in voice and text mode alike."""
+
+    title = "Stress cues from the camera, by the WorkStress3D facial CNN"
+    received = int(state.get("face_frames_received", 0) or 0)
+    detected = int(state.get("face_frames_detected", 0) or 0)
+    if not state.get("face_stress_available"):
+        reason = str(
+            state.get("face_stress_reason") or "the camera was off for this turn"
+        )
+        counts = f" ({detected} of {received} frames held a face)" if received else ""
+        return [
+            _step(
+                "face",
+                "Facial stress",
+                title,
+                status="skipped",
+                summary="no reading",
+                detail=f"{reason[:1].upper()}{reason[1:]}{counts}.",
+            )
+        ]
+    flagged = bool(state.get("face_stress"))
+    return [
+        _step(
+            "face",
+            "Facial stress",
+            title,
+            summary="stressed" if flagged else "calm",
+            detail=(
+                "Low-reliability evidence (5-fold CV accuracy 0.63 on 83 faces): "
+                "it only colours the reply wording at a low weight and never "
+                "selects the strategy or triggers escalation."
+            ),
+            outputs=[
+                _output("probability", _percent(state.get("face_stress_probability"))),
+                _output("frames with a face", f"{detected} of {received}"),
             ],
         )
     ]
@@ -425,6 +491,7 @@ def _generation_step(state: dict, route: str) -> dict[str, Any]:
         "qwen_remote": "generated on the support node",
         "template_fallback": "template fallback - the model could not be reached",
         "safety_template": "fixed safety template, no model call",
+        "scope_template": "fixed out-of-scope reply - the model's answer did the task",
     }
     detail = None
     if source == "template_fallback":
@@ -517,8 +584,10 @@ def build_trace(
     steps = [
         _input_step(state, mode),
         _safety_step(state),
+        _scope_step(state),
         _sensor_step(state),
         *_voice_steps(state, mode),
+        *_face_steps(state, mode),
         *_c3_steps(state, mode),
         *_emotion_steps(state),
         _deviation_step(state),

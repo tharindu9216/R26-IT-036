@@ -84,6 +84,21 @@ def build_cbt_predictor():
     return predictor
 
 
+def build_facial_analyzer():
+    """WorkStress3D facial CNN + Haar face crop. Small, so always in-process."""
+
+    from facial import FacialStressAnalyzer
+
+    return FacialStressAnalyzer(
+        settings.FACIAL_CHECKPOINT,
+        device=settings.FACIAL_DEVICE,
+        threshold=settings.FACIAL_THRESHOLD,
+        min_face_frames=settings.FACIAL_MIN_FACE_FRAMES,
+        max_frames=settings.FACIAL_MAX_FRAMES,
+        min_face_size=settings.FACIAL_MIN_FACE_SIZE,
+    )
+
+
 def build_voice_appraisal_analyzer():
     if settings.REMOTE_C2_URL:
         from remote_clients import RemoteVoiceAppraisalAnalyzer
@@ -172,6 +187,7 @@ def deployment_summary() -> dict[str, str]:
         "tts": settings.REMOTE_TTS_URL or f"local ({settings.TTS_DEVICE})",
         "c2": settings.REMOTE_C2_URL or f"local ({settings.C2_DEVICE})",
         "c3": f"local ({settings.C3_DEVICE})",
+        "face": f"local ({settings.FACIAL_DEVICE})",
         "emotion": f"local ({settings.EMOTION_DEVICE})",
     }
 

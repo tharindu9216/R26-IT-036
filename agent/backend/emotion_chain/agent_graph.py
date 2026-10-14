@@ -10,6 +10,7 @@ from typing import Any, Protocol, TypedDict
 from .core import select_reply_route
 from .deviation_tracker import compute_deviation
 from .fusion import fuse_stress_and_cbt
+from .scope import detect_out_of_scope
 from .reply_generator import (
     QwenReplyGenerator,
     ReplySignals,
@@ -37,6 +38,10 @@ class SupportiveAgentState(TypedDict, total=False):
     sensor_stress_probability: float | None
     sensor_stress_available: bool
     safety_status: str
+    # "out_of_scope" when the message asks for a task the companion does not
+    # do (code, homework, translation, documents); see scope.py.
+    scope_status: str
+    out_of_scope_category: str | None
     text_stress: bool
     text_stress_probability: float
     text_stress_confidence: float
@@ -58,6 +63,14 @@ class SupportiveAgentState(TypedDict, total=False):
     multimodal_stress_inputs: dict[str, float]
     voice_appraisal_state: str
     voice_appraisal_uncertain: bool
+    # Voice- and text-mode camera, scored by the caller before the graph runs (like C1
+    # and C2). Reply wording only; routing and escalation never read it.
+    face_stress_available: bool
+    face_stress: bool
+    face_stress_probability: float | None
+    face_frames_received: int
+    face_frames_detected: int
+    face_stress_reason: str | None
     current_emotion: str
     current_emotion_confidence: float
     current_emotion_probabilities: dict[str, float]
@@ -131,6 +144,20 @@ class SupportiveAgentWorkflow:
     @staticmethod
     def after_safety(state: SupportiveAgentState) -> str:
         return "crisis" if state.get("safety_status") == "crisis" else "continue"
+
+    @staticmethod
+    def scope_node(state: SupportiveAgentState) -> dict[str, Any]:
+        """Flag off-topic task requests; the pipeline still runs in full.
+
+        The emotion models still score the turn and the reply still answers
+        how the user feels -- the flag only tells the reply not to do the task.
+        """
+
+        category = detect_out_of_scope(state["user_text"])
+        return {
+            "scope_status": "in_scope" if category is None else "out_of_scope",
+            "out_of_scope_category": category,
+        }
 
     def crisis_node(self, state: SupportiveAgentState) -> dict[str, Any]:
         contacts = self.components.support_contacts
@@ -268,9 +295,18 @@ class SupportiveAgentWorkflow:
             voice_appraisal_uncertain=bool(
                 state.get("voice_appraisal_uncertain", False)
             ),
+            face_stress=bool(state.get("face_stress", False)),
+            face_stress_probability=(
+                state.get("face_stress_probability")
+                if state.get("face_stress_available")
+                else None
+            ),
+            face_frames_detected=int(state.get("face_frames_detected", 0) or 0),
             stress_probability=state.get("text_stress_probability"),
             cbt_probability=state.get("cbt_probability"),
             safety_status=state.get("safety_status", "normal"),
+            scope_checked="scope_status" in state,
+            out_of_scope_category=state.get("out_of_scope_category"),
         )
         result = self.components.reply_generator.generate(
             state["user_text"],
@@ -282,6 +318,12 @@ class SupportiveAgentWorkflow:
             "reply": result.text,
             "reply_source": result.source,
             "support_contacts": as_dicts(result.support_contacts),
+            # The reply's code filter can catch a request the input screen
+            # missed, so the generator's answer is the final word.
+            "scope_status": (
+                "in_scope" if result.out_of_scope_category is None else "out_of_scope"
+            ),
+            "out_of_scope_category": result.out_of_scope_category,
         }
 
     def compile(self, *, include_c3: bool = True):
@@ -297,6 +339,7 @@ class SupportiveAgentWorkflow:
         graph = StateGraph(SupportiveAgentState)
         graph.add_node("safety", self.safety_node)
         graph.add_node("crisis_reply", self.crisis_node)
+        graph.add_node("scope", self.scope_node)
         if include_c3:
             graph.add_node("c3_analysis", self.c3_node)
             graph.add_node("text_signal_fusion", self.fusion_node)
@@ -311,10 +354,11 @@ class SupportiveAgentWorkflow:
             self.after_safety,
             {
                 "crisis": "crisis_reply",
-                "continue": "c3_analysis" if include_c3 else "emotion_analysis",
+                "continue": "scope",
             },
         )
         graph.add_edge("crisis_reply", END)
+        graph.add_edge("scope", "c3_analysis" if include_c3 else "emotion_analysis")
         if include_c3:
             graph.add_edge("c3_analysis", "text_signal_fusion")
             graph.add_edge("text_signal_fusion", "emotion_analysis")
@@ -330,6 +374,6 @@ def build_supportive_graph(components: AgentComponents):
 
 
 def build_voice_supportive_graph(components: AgentComponents):
-    """Compile the C1 + C2 + emotion path without adding any C3 nodes."""
+    """Compile the C1 + C2 + face + emotion path without any C3 nodes."""
 
     return SupportiveAgentWorkflow(components).compile(include_c3=False)

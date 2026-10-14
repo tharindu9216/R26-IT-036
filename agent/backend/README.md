@@ -113,6 +113,35 @@ C3 fusion is text-mode only. In Voice mode the transcript goes directly to
 the safety and emotion nodes. C2 supplies the separate
 voice-appraisal/stress signal used for routing and reply context.
 
+## Facial stress (voice-mode camera)
+
+Voice mode asks once for the camera. If the user agrees, a small preview
+shows in the chat header, and while they record, the browser captures one
+480 px JPEG still every 0.7 s (at most 40 per turn, spread evenly). Those
+stills are posted with the audio as `face_frames`, and
+[`facial/`](facial/) scores them in memory and then discards them:
+
+```text
+frame -> Haar face detector (largest face) -> 48x48 grayscale
+      -> WorkStress3D FacialStressCNN -> P(stressful)
+turn  -> mean over frames that held a face (needs min_face_frames)
+```
+
+The checkpoint is `../model/WorkStress3D_Trained_Model/workstress3d_facial_stress_cnn_v2.pth`.
+It is weak evidence: 83 training faces, 5-fold CV accuracy 0.63 ± 0.16,
+ROC-AUC 0.68, specificity 0.53, and no subject-independent split. Because the
+CNN reads a face-less gray frame as about 95% stress, frames without a
+detected face are never scored. For the same reason, the face only appears in
+the Qwen prompt as a weighted line (`signal_influence.face_weight`, 0.15).
+It does **not** select the supportive route or count towards escalation.
+When the camera is off, or too few frames show a face, the turn has no facial
+reading, in the same way as an uncalibrated wearable. The doctor's trace shows
+the probability and how many frames held a face. Patients never see either.
+
+`GET /api/models/face/status` tells the UI whether to offer the camera at all
+(it is not offered when OpenCV or the checkpoint is missing).
+`POST /api/face/check` only answers "is a face in view" for the preview hint.
+
 ## Emotion states and the intensity forecast
 
 The current classifier predicts `neutral`, `anger`, `fear`, `joy`, or

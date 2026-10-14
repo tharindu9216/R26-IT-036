@@ -112,7 +112,7 @@ def fuse_stress_and_cbt(
 
 @dataclass(frozen=True)
 class InfluenceWeights:
-    """Trust multipliers for the three stress modalities, in [0, 1].
+    """Trust multipliers for the four stress modalities, in [0, 1].
 
     ``1.0`` marks primary evidence; a lower value marks a source the model
     should treat as a weaker hint that may be wrong. These are deliberately
@@ -124,9 +124,12 @@ class InfluenceWeights:
     text: float = 1.0
     sensor: float = 1.0
     voice: float = 1.0
+    # Voice- and text-mode camera (facial/). Its default is already low because the
+    # model behind it is the weakest-validated source; config.yaml sets it.
+    face: float = 0.15
 
     def __post_init__(self) -> None:
-        for name in ("text", "sensor", "voice"):
+        for name in ("text", "sensor", "voice", "face"):
             value = getattr(self, name)
             if not 0.0 <= value <= 1.0:
                 raise ValueError(
@@ -147,7 +150,8 @@ def weighted_influence(
 
     ``None`` means the source should not be shown to the model at all: either
     it is switched off (weight 0) or it did not run this turn -- C3 in voice
-    mode, C2 in text mode, C1 when no sensor is connected. A modality that ran
+    mode, C2 in text mode, C1 when no sensor is connected, the face when the
+    camera is off or never saw one. A modality that ran
     and found nothing still reports, at a low influence, because "the wristband
     looked and saw calm" is not the same as "nobody looked".
     """

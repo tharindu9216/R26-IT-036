@@ -49,6 +49,15 @@ class ChatStoreTests(unittest.TestCase):
             self.store.history("s2"), [("user", "theirs"), ("assistant", "ours")]
         )
 
+    def test_turn_contexts_follow_the_session(self) -> None:
+        self.store.save_turn_context("t1", "a", b"context-a")
+        self.store.save_turn_context("t2", "b", b"context-b")
+        self.assertEqual(self.store.turn_context("t1"), ("a", b"context-a"))
+        self.assertEqual(self.store.turn_context_ids("a"), {"t1"})
+        self.store.reset("a")
+        self.assertIsNone(self.store.turn_context("t1"))
+        self.assertEqual(self.store.turn_context_ids("b"), {"t2"})
+
     def test_reset_clears_only_the_named_session(self) -> None:
         self._exchange("s1", "mine", "yours")
         self._exchange("s2", "theirs", "ours")

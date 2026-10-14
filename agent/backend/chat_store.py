@@ -39,6 +39,27 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS messages_by_session ON messages (session_id, id);
+-- What a turn's XAI explanation needs (sensor windows, check-in answers, voice
+-- appraisal, ...), serialized by api.py. Kept here rather than only in memory
+-- so "Explain predictions" still works after the backend restarts.
+CREATE TABLE IF NOT EXISTS turn_contexts (
+    turn_id    TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    context    BLOB NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS turn_contexts_by_session ON turn_contexts (session_id, created_at);
+-- Numbers only (stress readings, emotion label, safety flags; no message text)
+-- per completed turn, for the doctor's multi-day summary. Deliberately outside
+-- the session TTL, New chat and the message cap: it is the patient's wellbeing
+-- history, not the conversation. Aged out by ``purge_metrics`` instead.
+CREATE TABLE IF NOT EXISTS turn_metrics (
+    turn_id    TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    metrics    TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS turn_metrics_by_session ON turn_metrics (session_id, created_at);
 """
 
 DEFAULT_SESSION_ID = "default"
@@ -138,6 +159,50 @@ class ChatStore:
             self._purge_expired(now)
             self._connection.commit()
 
+    def save_turn_context(self, turn_id: str, session_id: str, context: bytes) -> None:
+        session_id = normalize_session_id(session_id)
+        now = time.time()
+        with self._lock:
+            self._touch(session_id, now)
+            self._connection.execute(
+                "INSERT OR REPLACE INTO turn_contexts (turn_id, session_id, context, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (turn_id, session_id, sqlite3.Binary(context), now),
+            )
+            self._trim(session_id)
+            self._connection.commit()
+
+    def record_metrics(
+        self,
+        turn_id: str,
+        session_id: str,
+        metrics: dict[str, Any],
+        created_at: float | None = None,
+    ) -> None:
+        with self._lock:
+            self._connection.execute(
+                "INSERT OR REPLACE INTO turn_metrics (turn_id, session_id, metrics, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    turn_id,
+                    normalize_session_id(session_id),
+                    json.dumps(metrics, separators=(",", ":")),
+                    time.time() if created_at is None else float(created_at),
+                ),
+            )
+            self._connection.commit()
+
+    def purge_metrics(self, older_than_seconds: float) -> int:
+        if older_than_seconds <= 0:
+            return 0
+        with self._lock:
+            cursor = self._connection.execute(
+                "DELETE FROM turn_metrics WHERE created_at < ?",
+                (time.time() - older_than_seconds,),
+            )
+            self._connection.commit()
+        return cursor.rowcount
+
     def set_previous_emotion(self, session_id: str, label: str | None) -> None:
         """Carry this turn's emotion forward as the deviation baseline.
 
@@ -162,12 +227,10 @@ class ChatStore:
 
         session_id = normalize_session_id(session_id)
         with self._lock:
-            self._connection.execute(
-                "DELETE FROM messages WHERE session_id = ?", (session_id,)
-            )
-            self._connection.execute(
-                "DELETE FROM sessions WHERE session_id = ?", (session_id,)
-            )
+            for table in ("messages", "turn_contexts", "sessions"):
+                self._connection.execute(
+                    f"DELETE FROM {table} WHERE session_id = ?", (session_id,)
+                )
             self._connection.commit()
 
     def purge_expired(self) -> int:
@@ -234,6 +297,41 @@ class ChatStore:
             messages.append(message)
         return messages
 
+    def turn_context(self, turn_id: str) -> tuple[str, bytes] | None:
+        """``(session_id, serialized context)`` for one turn, or None."""
+
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT session_id, context FROM turn_contexts WHERE turn_id = ?",
+                (turn_id,),
+            ).fetchone()
+        return (row[0], bytes(row[1])) if row else None
+
+    def turn_context_ids(self, session_id: str) -> set[str]:
+        session_id = normalize_session_id(session_id)
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT turn_id FROM turn_contexts WHERE session_id = ?", (session_id,)
+            ).fetchall()
+        return {row[0] for row in rows}
+
+    def metrics(self, session_id: str, since: float) -> list[dict[str, Any]]:
+        """Every turn_metrics row of a session from ``since`` on, oldest first."""
+
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT metrics, created_at FROM turn_metrics "
+                "WHERE session_id = ? AND created_at >= ? ORDER BY created_at",
+                (normalize_session_id(session_id), float(since)),
+            ).fetchall()
+        result = []
+        for metrics, created_at in rows:
+            try:
+                result.append({"metrics": json.loads(metrics), "created_at": created_at})
+            except json.JSONDecodeError:
+                continue
+        return result
+
     def previous_emotion(self, session_id: str) -> str | None:
         session_id = normalize_session_id(session_id)
         with self._lock:
@@ -262,6 +360,14 @@ class ChatStore:
             ")",
             (session_id, session_id, self.max_messages),
         )
+        # One context per exchange, so half as many as messages.
+        self._connection.execute(
+            "DELETE FROM turn_contexts WHERE session_id = ? AND turn_id NOT IN ("
+            "  SELECT turn_id FROM turn_contexts WHERE session_id = ? "
+            "  ORDER BY created_at DESC LIMIT ?"
+            ")",
+            (session_id, session_id, max(1, self.max_messages // 2)),
+        )
 
     def _purge_expired(self, now: float) -> int:
         if self.ttl_seconds <= 0:
@@ -276,10 +382,8 @@ class ChatStore:
         if not stale:
             return 0
         placeholders = ",".join("?" * len(stale))
-        self._connection.execute(
-            f"DELETE FROM messages WHERE session_id IN ({placeholders})", stale
-        )
-        self._connection.execute(
-            f"DELETE FROM sessions WHERE session_id IN ({placeholders})", stale
-        )
+        for table in ("messages", "turn_contexts", "sessions"):
+            self._connection.execute(
+                f"DELETE FROM {table} WHERE session_id IN ({placeholders})", stale
+            )
         return len(stale)

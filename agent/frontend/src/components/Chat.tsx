@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { ChatMessage } from "../types";
+import { CameraConsent, FacePreview } from "./FaceCamera";
 import { SupportContacts } from "./SupportContacts";
+import { useFaceCamera } from "./useFaceCamera";
 
 
 export function Chat() {
@@ -10,6 +12,9 @@ export function Chat() {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  // Frames are captured from the first keystroke of a message until it is
+  // sent, the typed equivalent of voice mode's recording window.
+  const camera = useFaceCamera(sending);
 
 
 
@@ -42,12 +47,13 @@ export function Chat() {
   async function handleSend() {
     const text = input.trim();
     if (!text || sending) return;
+    const faceFrames = camera.endCapture();
     setInput("");
     setError(null);
     setMessages((prev) => [...prev, { role: "user", text }]);
     setSending(true);
     try {
-      const result = await api.sendChat(text);
+      const result = await api.sendChat(text, faceFrames);
 
       setMessages((prev) => [
         ...prev,
@@ -80,6 +86,13 @@ export function Chat() {
     setMessages([]);
   }
 
+  function handleInput(value: string) {
+    setInput(value);
+    if (value.trim()) camera.beginCapture();
+    // Cleared the box: whatever was captured belonged to a discarded message.
+    else camera.endCapture();
+  }
+
   return (
     <div className="card chat-card">
       <div className="chat-header">
@@ -90,15 +103,18 @@ export function Chat() {
             <span className="online-status"><i /> Here with you</span>
           </div>
         </div>
-        <button
-          type="button"
-          className="new-chat-button"
-          onClick={handleNewChat}
-          disabled={sending || messages.length === 0}
-          title="Forget this conversation and start a new one"
-        >
-          New chat
-        </button>
+        <div className="chat-header-actions">
+          <FacePreview camera={camera} />
+          <button
+            type="button"
+            className="new-chat-button"
+            onClick={handleNewChat}
+            disabled={sending || messages.length === 0}
+            title="Forget this conversation and start a new one"
+          >
+            New chat
+          </button>
+        </div>
       </div>
       <div className="chat-log">
         {messages.length === 0 && (
@@ -125,10 +141,11 @@ export function Chat() {
         <div ref={bottomRef} />
       </div>
       {error && <p className="error">{error}</p>}
+      {camera.error && <p className="camera-error">{camera.error}</p>}
       <div className="chat-input">
         <textarea
           value={input}
-          onChange={(event) => setInput(event.target.value)}
+          onChange={(event) => handleInput(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
@@ -144,6 +161,7 @@ export function Chat() {
           Send <span aria-hidden="true">↑</span>
         </button>
       </div>
+      <CameraConsent camera={camera} />
     </div>
   );
 }

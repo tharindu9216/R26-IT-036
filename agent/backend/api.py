@@ -1,9 +1,9 @@
 """FastAPI backend for the React supportive-agent frontend.
 
-Text mode runs C1 -> C3 Stress/CBT -> current emotion + next intensity ->
-LangGraph -> Qwen. Voice mode runs C1 + C2 voice appraisal -> speech-to-text
--> current emotion + next intensity -> LangGraph -> Qwen -> Kokoro. C3 is
-deliberately absent from the voice graph. Loaded models and the C1 sensor are
+Text mode runs C1 + the optional camera's facial stress -> C3 Stress/CBT ->
+current emotion + next intensity -> LangGraph -> Qwen. Voice mode runs C1 + C2 voice appraisal + the optional
+camera's facial stress -> speech-to-text -> current emotion + next intensity
+-> LangGraph -> Qwen -> Kokoro. C3 is deliberately absent from the voice graph. Loaded models and the C1 sensor are
 process-global; the conversation itself is not -- each turn carries a
 ``session_id`` and its history lives in the SQLite store from ``chat_store.py``.
 
@@ -12,9 +12,13 @@ Run from this directory: ``uvicorn api:app --reload --port 8005 --reload-exclude
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import pickle
 import threading
+import time
 import uuid
+from contextlib import asynccontextmanager
 from typing import Literal
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
@@ -39,11 +43,27 @@ from emotion_chain.multimodal_stress import (
 from emotion_chain.reply_generator import QwenReplyGenerator
 from emotion_chain.support_contacts import speakable
 from emotion_chain.trace import build_trace
+from wellbeing_summary import summarize, turn_metrics
 
 logging.basicConfig(level=logging.INFO)
 services.log_deployment_summary()
+LOGGER = logging.getLogger(__name__)
 
-app = FastAPI(title="Supportive agent API", dependencies=[Depends(protect_api)])
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    if settings.API_PRELOAD_MODELS:
+        # Blocking on purpose: uvicorn reports "Application startup complete"
+        # only once every model is in memory.
+        await asyncio.to_thread(preload_models)
+    yield
+
+
+app = FastAPI(
+    title="Supportive agent API",
+    dependencies=[Depends(protect_api)],
+    lifespan=lifespan,
+)
 app.include_router(auth_router)
 app.add_middleware(
     CORSMiddleware,
@@ -57,8 +77,10 @@ app.add_middleware(
 
 
 # --------------------------------------------------------------------------
-# Lazy-loaded workflows. The preparation endpoints now load them before the
-# chat UI opens; direct API clients still fall back to loading on first use.
+# Lazily-built workflows. With ``api.preload_models`` (the default) they are
+# all built at startup by ``preload_models``; otherwise the preparation
+# endpoints load them before the chat UI opens, and direct API clients fall
+# back to loading on first use.
 # --------------------------------------------------------------------------
 
 _workflow = None
@@ -138,6 +160,9 @@ def _initialize_shared_models() -> tuple[EmotionChain, QwenReplyGenerator]:
         _emotion_chain = services.build_emotion_chain()
     if _reply_generator is None:
         _reply_generator = services.build_reply_generator()
+    # The generator keeps its weights lazy; load them here so the first reply
+    # does not pay the Qwen load. A no-op when a support node generates.
+    _reply_generator.load()
     return _emotion_chain, _reply_generator
 
 
@@ -271,6 +296,11 @@ def prepare_voice_models() -> dict:
             _set_voice_model_status(active_stage, "loading")
             synthesizer.load()
             _set_voice_model_status(active_stage, "ready")
+
+            # Optional and failure-tolerant; warmed here so the first camera
+            # turn does not pay the load. Not a status key, so it can never
+            # block voice mode from opening.
+            get_facial_analyzer()
         except Exception as exc:
             message = str(exc)
             if active_stage == "emotion_chain":
@@ -283,6 +313,103 @@ def prepare_voice_models() -> dict:
                 detail=f"Voice conversation could not be prepared: {exc}",
             ) from exc
     return _voice_model_status_payload()
+
+
+_facial_analyzer = None
+_facial_error: str | None = None
+_facial_lock = threading.Lock()
+
+
+def get_facial_analyzer():
+    """The loaded facial model, or None when it cannot run on this machine.
+
+    The camera is optional evidence, so a missing OpenCV or checkpoint must
+    never take voice mode down with it: the error is remembered and reported
+    by ``/api/models/face/status``, and the UI then simply does not offer the
+    camera.
+    """
+
+    global _facial_analyzer, _facial_error
+    if _facial_analyzer is not None or _facial_error is not None:
+        return _facial_analyzer
+    with _facial_lock:
+        if _facial_analyzer is None and _facial_error is None:
+            try:
+                analyzer = services.build_facial_analyzer()
+                analyzer.load()
+                _facial_analyzer = analyzer
+            except Exception as exc:
+                _facial_error = str(exc)
+                logging.getLogger(__name__).warning(
+                    "Facial stress detection is unavailable: %s", exc
+                )
+    return _facial_analyzer
+
+
+@app.get("/api/models/face/status")
+def face_model_status() -> dict:
+    """Whether the voice UI should offer the camera at all."""
+
+    analyzer = get_facial_analyzer()
+    return {"available": analyzer is not None, "error": _facial_error}
+
+
+def _read_frame(frame: UploadFile) -> bytes:
+    content_type = (frame.content_type or "").lower()
+    if content_type and not (
+        content_type.startswith("image/") or content_type == "application/octet-stream"
+    ):
+        raise HTTPException(status_code=400, detail="Camera frames must be images")
+    content = frame.file.read(settings.FACIAL_MAX_FRAME_BYTES + 1)
+    if len(content) > settings.FACIAL_MAX_FRAME_BYTES:
+        raise HTTPException(status_code=413, detail="A camera frame is too large")
+    return content
+
+
+@app.post("/api/face/check")
+def face_check(frame: UploadFile = File(...)) -> dict:
+    """Is a face in view? Feeds the preview hint only -- no stress is scored."""
+
+    analyzer = get_facial_analyzer()
+    if analyzer is None:
+        raise HTTPException(status_code=503, detail="Facial analysis is unavailable")
+    try:
+        return {"face_detected": analyzer.detect_face(_read_frame(frame))}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not read the frame: {exc}") from exc
+
+
+def _facial_turn_data(frames: list[bytes]) -> tuple[dict, dict]:
+    """Score this turn's camera frames; any failure is "no reading", never an error."""
+
+    from facial import unavailable
+
+    analyzer = get_facial_analyzer() if frames else None
+    if not frames:
+        result = unavailable("the camera was off for this turn")
+    elif analyzer is None:
+        result = unavailable(
+            "facial analysis is unavailable on this server", frames_received=len(frames)
+        )
+    else:
+        try:
+            result = analyzer.predict_frames(frames)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Facial stress failed: %s", exc)
+            result = unavailable(
+                "the camera frames could not be analysed", frames_received=len(frames)
+            )
+    state = {
+        "face_stress_available": result.available,
+        "face_stress": result.is_stressed,
+        "face_stress_probability": result.probability,
+        "face_frames_received": result.frames_received,
+        "face_frames_detected": result.faces_detected,
+        "face_stress_reason": result.reason,
+    }
+    return state, {"facial_stress": result.as_dict()}
 
 
 def get_voice_services():
@@ -298,6 +425,56 @@ def get_voice_services():
             if _voice_services is None:
                 _voice_services = services.build_voice_services()
     return _voice_services
+
+
+_c1_predictor = None
+_c1_predictor_lock = threading.Lock()
+
+
+def get_c1_predictor():
+    """The C1 Feature-MLP, loaded once and shared by every sensor session.
+
+    It holds no per-session state -- each ``SerialSensorService`` keeps its own
+    calibration -- so restarting the sensor need not reload the artifacts.
+    """
+
+    global _c1_predictor
+    if _c1_predictor is None:
+        with _c1_predictor_lock:
+            if _c1_predictor is None:
+                from c1.inference import C1FeatureMLPPredictor
+
+                _c1_predictor = C1FeatureMLPPredictor()
+    return _c1_predictor
+
+
+def preload_models() -> None:
+    """Load every model up front; a failure is logged, never fatal.
+
+    A stage that fails stays unloaded, so its prepare endpoint retries it and
+    reports the error to the UI exactly as it would without preloading.
+    """
+
+    stages = (
+        ("C1 sensor model", get_c1_predictor),
+        ("text workflow (C3, emotion chain, Qwen)", get_workflow),
+        ("voice workflow (Whisper, C2, Kokoro)", prepare_voice_models),
+        ("facial stress model", get_facial_analyzer),
+    )
+    started = time.perf_counter()
+    for name, load in stages:
+        stage_started = time.perf_counter()
+        LOGGER.info("Preloading %s ...", name)
+        try:
+            load()
+        except Exception as exc:
+            detail = exc.detail if isinstance(exc, HTTPException) else exc
+            LOGGER.error("Preloading %s failed: %s", name, detail)
+        else:
+            LOGGER.info(
+                "Preloaded %s in %.1f s", name, time.perf_counter() - stage_started
+            )
+    LOGGER.info("Model preload finished in %.1f s", time.perf_counter() - started)
 
 
 def get_components() -> AgentComponents:
@@ -480,7 +657,8 @@ def start_sensor(payload: StartSensorRequest, request: Request) -> dict:
                     port=payload.port,
                     smoothing_window=settings.C1_SMOOTHING_WINDOW,
                     smoothing_required=settings.C1_SMOOTHING_REQUIRED,
-                )
+                ),
+                get_c1_predictor(),
             )
             try:
                 service.start()
@@ -577,6 +755,7 @@ def upload_sensor_recording(request: Request, files: list[UploadFile] = File(...
                     smoothing_required=settings.C1_SMOOTHING_REQUIRED,
                     bvp_source=bvp_source,
                 ),
+                get_c1_predictor(),
                 serial_factory=lambda **_: connection,
             )
             service.start()
@@ -811,6 +990,10 @@ def _remember_turn_messages(
     _store.append(session_id, "user", user_text)
     _store.append(session_id, "assistant", result["reply"], trace=trace)
     _store.set_previous_emotion(session_id, result.get("current_emotion"))
+    if trace and trace.get("turn_id"):
+        _store.record_metrics(
+            trace["turn_id"], session_id, turn_metrics(result, str(trace.get("mode", "text")))
+        )
 
 
 def _deviation_payload(result: dict) -> dict:
@@ -823,15 +1006,82 @@ def _deviation_payload(result: dict) -> dict:
 
 
 def _remember_turn(turn_id: str, context: dict) -> None:
+    """Keep what this turn's XAI needs, in memory and in the chat store.
+
+    The in-memory dict is a cache of recent turns; the store is what lets
+    "Explain predictions" work for older turns and after a backend restart.
+    """
+
     with _turn_context_lock:
         _turn_contexts[turn_id] = context
         while len(_turn_contexts) > 50:
             _turn_contexts.pop(next(iter(_turn_contexts)))
+    # The C1 predictor is the shared process-wide model, not turn data; it is
+    # reattached on load. Everything else is plain dataclasses and arrays.
+    stored = {**context, "sensor_predictor": None}
+    try:
+        _store.save_turn_context(
+            turn_id, context["patient_id"], pickle.dumps(stored, pickle.HIGHEST_PROTOCOL)
+        )
+    except Exception as exc:
+        LOGGER.warning("Could not save the XAI context for turn %s: %s", turn_id, exc)
+
+
+def _turn_context(turn_id: str) -> dict | None:
+    """A turn's XAI context: the memory cache first, then the chat store.
+
+    Only this app writes the store (a local SQLite file next to config.yaml),
+    which is why unpickling it is acceptable.
+    """
+
+    with _turn_context_lock:
+        context = _turn_contexts.get(turn_id)
+    if context is not None:
+        return context
+    row = _store.turn_context(turn_id)
+    if row is None:
+        return None
+    try:
+        context = pickle.loads(row[1])
+    except Exception as exc:
+        LOGGER.warning("Stored XAI context for turn %s is unreadable: %s", turn_id, exc)
+        return None
+    if context.get("sensor_predictions"):
+        context["sensor_predictor"] = get_c1_predictor()
+    with _turn_context_lock:
+        _turn_contexts[turn_id] = context
+        while len(_turn_contexts) > 50:
+            _turn_contexts.pop(next(iter(_turn_contexts)))
+    return context
 
 
 @app.post("/api/chat")
 def chat(payload: ChatRequest, request: Request) -> dict:
-    text = payload.message.strip()
+    return _text_turn(request, payload.message)
+
+
+@app.post("/api/chat/face")
+def chat_with_face(
+    request: Request,
+    message: str = Form(...),
+    session_id: str = Form(DEFAULT_SESSION_ID),
+    face_frames: list[UploadFile] | None = File(None),
+) -> dict:
+    """A typed turn plus the webcam stills captured while the user typed it.
+
+    Same pipeline as ``/api/chat``; the frames are scored in memory, discarded,
+    and only sway the reply wording at the configured low face weight.
+    """
+
+    frames = [
+        _read_frame(frame)
+        for frame in (face_frames or [])[: settings.FACIAL_MAX_FRAMES]
+    ]
+    return _text_turn(request, message, frames)
+
+
+def _text_turn(request: Request, message: str, frames: list[bytes] | None = None) -> dict:
+    text = message.strip()
     if not text:
         raise HTTPException(status_code=400, detail="message cannot be empty")
 
@@ -841,6 +1091,7 @@ def chat(payload: ChatRequest, request: Request) -> dict:
     multimodal_state, multimodal_context = _multimodal_turn_data(
         session_id, sensor_state
     )
+    face_state, face_context = _facial_turn_data(frames or [])
     with _pipeline_lock:
         state = {
             "user_text": text,
@@ -849,6 +1100,7 @@ def chat(payload: ChatRequest, request: Request) -> dict:
             "previous_emotion": _store.previous_emotion(session_id),
             **sensor_state,
             **multimodal_state,
+            **face_state,
         }
         result = get_workflow().invoke(state)
 
@@ -868,6 +1120,7 @@ def chat(payload: ChatRequest, request: Request) -> dict:
             "message": text,
             **sensor_context,
             **multimodal_context,
+            **face_context,
         },
     )
 
@@ -901,10 +1154,13 @@ def voice_chat(
     request: Request,
     audio: UploadFile = File(...),
     session_id: str = Form(DEFAULT_SESSION_ID),
+    face_frames: list[UploadFile] | None = File(None),
 ) -> dict:
-    """Run C1 + C2 + STT + emotion graph + Qwen + Kokoro for one turn.
+    """Run C1 + C2 + face + STT + emotion graph + Qwen + Kokoro for one turn.
 
     C3 Stress and CBT predictors are neither loaded nor called by this route.
+    ``face_frames`` are the webcam stills captured while the user spoke; they
+    are optional, scored in memory and discarded.
     """
 
     content_type = (audio.content_type or "").lower()
@@ -918,6 +1174,12 @@ def voice_chat(
             status_code=413,
             detail=f"Audio exceeds the {settings.C2_MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit",
         )
+    # Read and size-check before any model runs. The UI already sends at most
+    # max_frames spread across the utterance; this only bounds a direct client.
+    frames = [
+        _read_frame(frame)
+        for frame in (face_frames or [])[: settings.FACIAL_MAX_FRAMES]
+    ]
 
     try:
         from c2 import decode_audio
@@ -947,6 +1209,7 @@ def voice_chat(
         sensor_state,
         voice_probability=float(appraisal.voice_stress_score),
     )
+    face_state, face_context = _facial_turn_data(frames)
     with _pipeline_lock:
         state = {
             "user_text": transcription.text,
@@ -954,6 +1217,7 @@ def voice_chat(
             "previous_emotion": _store.previous_emotion(session_id),
             **sensor_state,
             **multimodal_state,
+            **face_state,
             "voice_stress": appraisal.voice_stress,
             "voice_stress_score": appraisal.voice_stress_score,
             "voice_appraisal_state": appraisal.dominant_state,
@@ -984,6 +1248,7 @@ def voice_chat(
             "voice_appraisal": appraisal.as_dict(),
             **sensor_context,
             **multimodal_context,
+            **face_context,
         },
     )
     with _voice_audio_lock:
@@ -1087,7 +1352,9 @@ def _serialize_mean_feature_attributions(groups) -> list[dict[str, float | str]]
     return sorted(serialized, key=lambda item: abs(float(item["score"])), reverse=True)
 
 
-def _xai_coverage(mode: str, response: dict) -> list[dict[str, str]]:
+def _xai_coverage(
+    mode: str, response: dict, face: dict | None = None
+) -> list[dict[str, str]]:
     """State exactly what XAI covers, reuses, or intentionally cannot claim."""
 
     def item(component: str, status: str, detail: str) -> dict[str, str]:
@@ -1116,6 +1383,18 @@ def _xai_coverage(mode: str, response: dict) -> list[dict[str, str]]:
             else "There were no available signals to combine for this turn.",
         ),
     ]
+    face_item = item(
+        "Facial stress model (camera)",
+        "recorded" if face and face.get("available") else "unavailable",
+        (
+            f"Mean stress probability {float(face['probability']):.0%} over "
+            f"{face['faces_detected']} frames with a face is saved. Frames "
+            "are not kept, so no Grad-CAM map can be drawn afterwards; it "
+            "only sways reply wording at a low weight."
+        )
+        if face and face.get("available")
+        else "The camera was off, or too few frames showed a face, for this turn.",
+    )
     if mode == "voice":
         return [
             item(
@@ -1131,6 +1410,7 @@ def _xai_coverage(mode: str, response: dict) -> list[dict[str, str]]:
                 if response.get("voice")
                 else "No voice appraisal was saved for this turn.",
             ),
+            face_item,
             item(
                 "C3 stress and thinking-pattern models",
                 "not_used",
@@ -1165,6 +1445,7 @@ def _xai_coverage(mode: str, response: dict) -> list[dict[str, str]]:
 
     return [
         *shared,
+        face_item,
         item(
             "C3 stress model",
             "explained" if response.get("stress") else "unavailable",
@@ -1234,8 +1515,7 @@ def explain_chat(payload: XAIRequest, request: Request) -> dict:
 
     turn_context = None
     if payload.turn_id:
-        with _turn_context_lock:
-            turn_context = _turn_contexts.get(payload.turn_id)
+        turn_context = _turn_context(payload.turn_id)
         if turn_context is None:
             raise HTTPException(status_code=404, detail="Explanation context expired")
         if turn_context["message"] != text:
@@ -1414,7 +1694,11 @@ def explain_chat(payload: XAIRequest, request: Request) -> dict:
             response["errors"]["emotion"] = str(exc)
 
     response["mode"] = request_mode
-    response["coverage"] = _xai_coverage(request_mode, response)
+    response["coverage"] = _xai_coverage(
+        request_mode,
+        response,
+        turn_context.get("facial_stress") if turn_context else None,
+    )
     response["resource_note"] = (
         "Voice XAI reuses the saved C2 appraisal and does not rerun STT, TTS or "
         "Qwen. Only the shared current/next emotion models and an optional small "
@@ -1436,8 +1720,7 @@ def _claim_sensor(request: Request) -> None:
 
 
 def _authorized_turn(turn_id: str, user: dict) -> dict:
-    with _turn_context_lock:
-        context = _turn_contexts.get(turn_id)
+    context = _turn_context(turn_id)
     if not context or not accounts.can_access(user, context.get("patient_id", "")):
         raise HTTPException(404, "This turn is unavailable or its explanation has expired.")
     return context
@@ -1460,12 +1743,32 @@ def doctor_patients(request: Request) -> list[dict]:
     return result
 
 
+@app.get("/api/doctor/summary")
+def doctor_summary(request: Request, days: int = 7) -> dict:
+    """Stress, emotion and safety trends for one linked patient over ``days``.
+
+    Built from the per-turn numbers in ``turn_metrics`` rather than the chat
+    transcript, which only lives for a day. Also covers the period before, so
+    the view can say whether things got better or worse.
+    """
+
+    if not 1 <= days <= 90:
+        raise HTTPException(status_code=400, detail="days must be between 1 and 90")
+    target = patient_id(request)
+    _store.purge_metrics(settings.CHAT_METRICS_RETENTION_DAYS * 86_400)
+    # Two periods back, plus a day of slack for the local-midnight boundary.
+    since = time.time() - (2 * days + 1) * 86_400
+    return summarize(_store.metrics(target, since), days=days)
+
+
 @app.get("/api/doctor/activity")
 def doctor_activity(request: Request) -> list[dict]:
     _store.purge_expired()
-    messages = _store.transcript(patient_id(request))
+    target = patient_id(request)
+    messages = _store.transcript(target)
+    available = _store.turn_context_ids(target)
     with _turn_context_lock:
-        available = set(_turn_contexts)
+        available |= set(_turn_contexts)
     for message in messages:
         turn_id = (message.get("trace") or {}).get("turn_id")
         message["explanation_available"] = bool(turn_id and turn_id in available)

@@ -159,6 +159,12 @@ export interface VoiceAppraisal {
   contributions: XAIAttribution[];
 }
 
+/** Whether the server can score camera frames; the UI only offers the camera when it can. */
+export interface FaceModelStatus {
+  available: boolean;
+  error: string | null;
+}
+
 export interface VoiceChatResponse extends ChatResponse {
   transcript: string;
   duration_seconds: number;
@@ -210,4 +216,44 @@ export interface Account {
 export interface PatientSummary extends Account {
   message_count: number;
   latest_activity: number | null;
+}
+
+export type StressSourceKey = "combined" | "questionnaire" | "sensor" | "text" | "voice" | "face";
+
+export interface WellbeingSummary {
+  days: number;
+  start: string;
+  end: string;
+  totals: {
+    check_ins: number;
+    previous_check_ins: number;
+    text: number;
+    voice: number;
+    active_days: number;
+    crisis: number;
+    contacts_offered: number;
+    high_deviation: number;
+    high_intensity_forecasts: number;
+    out_of_scope: number;
+  };
+  negative_share: number | null;
+  previous_negative_share: number | null;
+  sources: {
+    key: StressSourceKey;
+    label: string;
+    average: number | null;
+    previous_average: number | null;
+    change: number | null;
+    readings: number;
+  }[];
+  daily: {
+    date: string;
+    check_ins: number;
+    stress: Record<StressSourceKey, number | null>;
+    dominant_emotion: string | null;
+    crisis: number;
+    contacts_offered: number;
+  }[];
+  emotions: { label: string; count: number; share: number }[];
+  events: { time: string; mode: string; kind: "crisis" | "contacts_offered" }[];
 }
