@@ -15,7 +15,7 @@ const CHART_SERIES: { key: StressSourceKey; label: string; color: string }[] = [
 ];
 
 const SOURCE_NOTES: Partial<Record<StressSourceKey, string>> = {
-  questionnaire: "Six-question check-in",
+  questionnaire: "Legacy momentary check-in",
   sensor: "BVP/EDA wearable",
   face: "Low-reliability camera model",
 };

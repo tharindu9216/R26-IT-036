@@ -4,6 +4,7 @@ import type { ChatMessage, PatientSummary, SensorStatus, XAIResponse } from "../
 import { XAIView } from "./XAIView";
 import { LiveSensorWaveforms } from "./SensorWaveforms";
 import { WellbeingSummary } from "./WellbeingSummary";
+import { DASSReview } from "./DASSReview";
 
 function SensorPanel() {
   const [status, setStatus] = useState<SensorStatus | null>(null);
@@ -68,7 +69,7 @@ function PatientReview({ patient }: { patient: PatientSummary }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [tab, setTab] = useState<"summary" | "activity" | "sensor">("summary");
+  const [tab, setTab] = useState<"summary" | "activity" | "sensor" | "assessments">("summary");
   useEffect(() => {
     let active = true;
     let timer: number | undefined;
@@ -80,8 +81,8 @@ function PatientReview({ patient }: { patient: PatientSummary }) {
     void refresh();
     return () => { active = false; window.clearTimeout(timer); };
   }, []);
-  return <section className="patient-review"><header className="review-heading"><div><span className="eyebrow">PATIENT OVERVIEW</span><h2>{patient.name}</h2><p>{patient.email}</p></div><span className="sharing-badge">Access shared by patient</span></header><nav className="review-tabs" aria-label="Patient information"><button aria-pressed={tab === "summary"} onClick={() => setTab("summary")}>Summary</button><button aria-pressed={tab === "activity"} onClick={() => setTab("activity")}>Activity & explanations</button><button aria-pressed={tab === "sensor"} onClick={() => setTab("sensor")}>Sensor signals</button></nav>
-    {tab === "summary" ? <WellbeingSummary /> : error ? <p className="error" role="alert">{error}</p> : tab === "sensor" ? <SensorPanel /> : <section className="card portal-panel"><div className="activity-heading"><h3>Recent conversations</h3><small>Updates every 10 seconds</small></div>{loading && <p role="status">Loading activity…</p>}{!loading && messages.length === 0 && <div className="portal-empty"><h3>No activity yet</h3><p>This patient’s conversations will appear here after their first check-in.</p></div>}{messages.map((message, index) => message.role === "assistant" ? <ActivityTurn key={message.trace?.turn_id ?? `${message.created_at}-${index}`} message={message} input={messages[index - 1]?.role === "user" ? messages[index - 1].text : "No saved input"} /> : null)}</section>}
+  return <section className="patient-review"><header className="review-heading"><div><span className="eyebrow">PATIENT OVERVIEW</span><h2>{patient.name}</h2><p>{patient.email}</p></div><span className="sharing-badge">Access shared by patient</span></header><nav className="review-tabs" aria-label="Patient information"><button aria-pressed={tab === "summary"} onClick={() => setTab("summary")}>Summary</button><button aria-pressed={tab === "activity"} onClick={() => setTab("activity")}>Activity & explanations</button><button aria-pressed={tab === "assessments"} onClick={() => setTab("assessments")}>DASS-21</button><button aria-pressed={tab === "sensor"} onClick={() => setTab("sensor")}>Sensor signals</button></nav>
+    {tab === "summary" ? <WellbeingSummary /> : tab === "assessments" ? <DASSReview /> : error ? <p className="error" role="alert">{error}</p> : tab === "sensor" ? <SensorPanel /> : <section className="card portal-panel"><div className="activity-heading"><h3>Recent conversations</h3><small>Updates every 10 seconds</small></div>{loading && <p role="status">Loading activity…</p>}{!loading && messages.length === 0 && <div className="portal-empty"><h3>No activity yet</h3><p>This patient’s conversations will appear here after their first check-in.</p></div>}{messages.map((message, index) => message.role === "assistant" ? <ActivityTurn key={message.trace?.turn_id ?? `${message.created_at}-${index}`} message={message} input={messages[index - 1]?.role === "user" ? messages[index - 1].text : "No saved input"} /> : null)}</section>}
   </section>;
 }
 
@@ -91,6 +92,8 @@ export function DoctorPortal() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
+  const [refreshKey, setRefreshKey] = useState(0);
+  useEffect(() => () => { selectPatient(""); }, []);
   useEffect(() => {
     let active = true;
     let timer: number | undefined;
@@ -100,8 +103,8 @@ export function DoctorPortal() {
       finally { if (active) { setLoading(false); timer = window.setTimeout(refresh, 10000); } }
     }
     void refresh();
-    return () => { active = false; window.clearTimeout(timer); selectPatient(""); };
-  }, []);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [refreshKey]);
   const patient = patients.find(item => item.id === selected);
   // Only patients who linked this doctor are listed; the search narrows them.
   const query = search.trim().toLowerCase();
@@ -110,7 +113,7 @@ export function DoctorPortal() {
     : patients;
   return <div className="doctor-portal"><header className="doctor-heading"><div><span className="eyebrow">YOUR CARE WORKSPACE</span><h1>A clearer view of their wellbeing.</h1><p>Review patient activity and the evidence behind each supportive response.</p></div><span className="patient-count">{patients.length}<small>linked patients</small></span></header>
     {error && <p className="error" role="alert">{error}</p>}
-    <div className="doctor-layout"><aside className="card patient-list"><h2>Your patients</h2><label className="patient-search">Find a patient<input type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder="Search name or email" /></label>{loading && <p role="status">Loading patients…</p>}{!loading && patients.length === 0 && <p>No patients are linked to you yet. A patient appears here, and becomes searchable, after they enter your email under “Your care team” in their portal.</p>}{!loading && patients.length > 0 && matches.length === 0 && <p role="status">No linked patient matches “{search.trim()}”.</p>}{matches.map(item => <button key={item.id} className={selected === item.id ? "selected" : ""} onClick={() => { selectPatient(item.id); setSelected(item.id); }}><strong>{item.name}</strong><span>{item.email}</span><small>{item.message_count} messages{item.latest_activity ? ` · ${new Date(item.latest_activity * 1000).toLocaleDateString()}` : " · No activity yet"}</small></button>)}</aside>
+    <div className="doctor-layout"><aside className="card patient-list"><h2>Your patients</h2><div className="directory-toolbar"><small>{patients.length} linked · Updates every 10 seconds</small><button disabled={loading} onClick={() => { setLoading(true); setRefreshKey(key => key + 1); }}>Refresh patients</button></div><label className="patient-search">Find a patient<input type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder="Search name or email" /></label>{loading && <p role="status">Loading patients…</p>}{!loading && patients.length === 0 && <p>No patients are linked to you yet. A patient appears here, and becomes searchable, after they select you and confirm sharing under “Your care team” in their portal.</p>}{!loading && patients.length > 0 && matches.length === 0 && <p role="status">No linked patient matches “{search.trim()}”.</p>}{matches.map(item => <button key={item.id} className={selected === item.id ? "selected" : ""} aria-pressed={selected === item.id} onClick={() => { selectPatient(item.id); setSelected(item.id); }}><strong>{item.name}</strong><span>{item.email}</span><small>{item.message_count} messages{item.latest_activity ? ` · ${new Date(item.latest_activity * 1000).toLocaleDateString()}` : " · No activity yet"}</small></button>)}</aside>
       {patient ? <PatientReview key={patient.id} patient={patient} /> : <section className="card portal-empty"><span aria-hidden="true">♡</span><h2>Select a patient</h2><p>Open a patient’s activity to review their conversations, signals, and explanations.</p></section>}
     </div>
   </div>;

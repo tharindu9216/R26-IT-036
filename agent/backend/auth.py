@@ -54,7 +54,7 @@ def protect_api(request: Request) -> None:
         return
     user = current_user(request)
     doctor_only = path.startswith('/api/doctor') or path in ('/api/xai', '/api/deployment') or path.startswith('/api/sensor/')
-    patient_only = path in ('/api/chat', '/api/chat/face', '/api/chat/reset', '/api/voice/chat', '/api/face/check', '/api/questionnaire', '/api/auth/doctor')
+    patient_only = path.startswith('/api/assessments/') or path in ('/api/chat', '/api/chat/face', '/api/chat/reset', '/api/voice/chat', '/api/face/check', '/api/questionnaire', '/api/auth/doctor', '/api/auth/doctors')
     if doctor_only and user['role'] != 'doctor':
         raise HTTPException(403, 'This page is available to doctors only.')
     if patient_only and user['role'] != 'patient':
@@ -102,6 +102,11 @@ def link_doctor(payload: DoctorLink, request: Request) -> dict:
         return result
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+
+
+@router.get('/doctors')
+def doctor_directory() -> list[dict]:
+    return accounts.doctors()
 
 
 @router.delete('/doctor')

@@ -23,7 +23,8 @@ from typing import Literal
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt
+import dass21
 from auth import accounts, current_user, patient_id, protect_api, router as auth_router
 
 import services
@@ -157,7 +158,9 @@ def _voice_model_status_payload() -> dict:
 def _initialize_shared_models() -> tuple[EmotionChain, QwenReplyGenerator]:
     global _emotion_chain, _reply_generator
     if _emotion_chain is None:
+        LOGGER.info("Loading C4 current-emotion classifier and next-intensity forecaster ...")
         _emotion_chain = services.build_emotion_chain()
+        LOGGER.info("C4 emotion models loaded")
     if _reply_generator is None:
         _reply_generator = services.build_reply_generator()
     # The generator keeps its weights lazy; load them here so the first reply
@@ -174,12 +177,16 @@ def get_workflow():
                 active_stage = "stress_language"
                 try:
                     _set_text_model_status(active_stage, "loading")
+                    LOGGER.info("Loading C3 stress ensemble ...")
                     stress_predictor = services.build_stress_predictor()
+                    LOGGER.info("C3 stress ensemble loaded")
                     _set_text_model_status(active_stage, "ready")
 
                     active_stage = "cognitive_patterns"
                     _set_text_model_status(active_stage, "loading")
+                    LOGGER.info("Loading C3 CBT ensemble ...")
                     cbt_predictor = services.build_cbt_predictor()
+                    LOGGER.info("C3 CBT ensemble loaded")
                     _set_text_model_status(active_stage, "ready")
 
                     # EmotionChain owns both the present-emotion classifier and
@@ -536,6 +543,10 @@ class QuestionnaireRequest(BaseModel):
     session_id: str | None = None
 
 
+class DASS21Request(BaseModel):
+    answers: dict[str, StrictInt]
+
+
 class XAIRequest(BaseModel):
     message: str
     turn_id: str | None = None
@@ -812,10 +823,8 @@ def sensor_status(
         if _sensor_patient_id != session_id:
             return {"mode": "idle", "ready": False}
         payload = _sensor_status_payload(include_waveform=include_waveform)
-    # The chat badge must never expose the raw five-second C1 result. Once C1
-    # has a prediction, fuse that latest probability with this session's fixed
-    # questionnaire result and return the combined value alongside the raw
-    # fields retained for XAI.
+    # Return the shared live estimate alongside fields retained for doctor XAI.
+    # DASS-21 remains separate; it describes the past week, not this sensor turn.
     if payload.get("sensor_stress_probability") is not None:
         sensor_state = {
             "sensor_stress_available": True,
@@ -826,6 +835,109 @@ def sensor_status(
         )
         payload.update(multimodal_state)
     return payload
+
+
+def _chat_readiness_payload(session_id: str) -> dict:
+    """Patient-safe readiness only; caller holds _sensor_lock."""
+    result = {
+        "ready": False,
+        "state": "waiting_for_sensor",
+        "message": "Ask your doctor to connect your wearable or start a sensor recording.",
+        "calibration_remaining_seconds": 0.0,
+        "warmup_remaining_seconds": 0.0,
+    }
+    if _c1_service is None or _sensor_patient_id != session_id or _sensor_skipped:
+        return result
+
+    from c1 import ServiceState
+
+    snapshot = _c1_service.snapshot()
+    result.update(
+        state=snapshot.state.value,
+        calibration_remaining_seconds=max(0.0, snapshot.calibration_remaining_seconds),
+        warmup_remaining_seconds=max(0.0, snapshot.warmup_remaining_seconds),
+    )
+    if snapshot.stream_stalled:
+        result.update(state="stalled", message="Your wearable stopped sending readings. Ask your doctor to check it.")
+    elif snapshot.state == ServiceState.ERROR or snapshot.last_error:
+        result.update(state="error", message="Your wearable needs attention. Ask your doctor to check it.")
+    elif (
+        snapshot.state == ServiceState.RUNNING
+        and snapshot.calibration is not None
+        and snapshot.last_prediction is not None
+        and snapshot.smoothed_probability is not None
+    ):
+        if _dass21_status(session_id)["completed"]:
+            result.update(ready=True, message="Your wearable is ready for your conversation.")
+        else:
+            result.update(state="waiting_for_assessment", message="Please complete your DASS-21 assessment before starting your conversation.")
+    elif snapshot.state == ServiceState.CALIBRATING:
+        result["message"] = "Please wait while your wearable completes personal calibration."
+    elif snapshot.state == ServiceState.WARMING_UP or snapshot.state == ServiceState.RUNNING:
+        result.update(state="warming_up", message="Calibration is complete. Please wait for your first sensor reading.")
+    else:
+        result["message"] = "Waiting for your wearable to connect and send readings."
+    return result
+
+
+@app.get("/api/chat/readiness")
+def chat_readiness(request: Request) -> dict:
+    session_id = patient_id(request)
+    with _sensor_lock:
+        return _chat_readiness_payload(session_id)
+
+
+def _require_ready_sensor(session_id: str) -> tuple[dict, dict]:
+    """Reject chat before model inference, using this patient's active sensor."""
+    with _sensor_lock:
+        readiness = _chat_readiness_payload(session_id)
+        if not readiness["ready"]:
+            raise HTTPException(status_code=409, detail=readiness["message"])
+        state, context = _sensor_turn_data(session_id)
+        if not state["sensor_stress_available"]:
+            raise HTTPException(status_code=409, detail="Please wait for a fresh sensor reading before chatting.")
+        return state, context
+
+
+def _dass21_status(session_id: str) -> dict:
+    history = _store.dass21_history(session_id, limit=1)
+    if not history:
+        return {"completed": False}
+    latest = history[0]
+    valid_until = latest["completed_at"] + dass21.REASSESS_AFTER_SECONDS
+    return {"completed": latest["version"] == dass21.VERSION and time.time() < valid_until,
+            "assessment_id": latest["assessment_id"], "completed_at": latest["completed_at"],
+            "valid_until": valid_until}
+
+
+@app.get("/api/assessments/dass21/form")
+def dass21_form() -> dict:
+    return dass21.form_definition()
+
+
+@app.get("/api/assessments/dass21/status")
+def dass21_status(request: Request) -> dict:
+    return _dass21_status(patient_id(request))
+
+
+@app.post("/api/assessments/dass21")
+def submit_dass21(payload: DASS21Request, request: Request) -> dict:
+    try:
+        scores = dass21.score_answers(payload.answers)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    target = patient_id(request)
+    saved = _store.save_dass21(target, dass21.VERSION, payload.answers, scores)
+    # Scores and item answers are intentionally absent from patient responses.
+    return {"completed": True, "assessment_id": saved["assessment_id"],
+            "completed_at": saved["completed_at"],
+            "valid_until": saved["completed_at"] + dass21.REASSESS_AFTER_SECONDS}
+
+
+@app.get("/api/doctor/assessments/dass21")
+def doctor_dass21_history(request: Request) -> dict:
+    target = patient_id(request)
+    return {"assessments": _store.dass21_history(target), "form": dass21.form_definition()}
 
 
 @app.get("/api/questionnaire/status")
@@ -937,10 +1049,11 @@ def _multimodal_turn_data(
     *,
     voice_probability: float | None = None,
 ) -> tuple[dict, dict]:
-    """Fuse the saved check-in with the inputs available for this turn."""
+    """Prepare live turn signals; past-week DASS-21 stays separate."""
 
-    with _questionnaire_lock:
-        questionnaire = _questionnaire_results.get(session_id)
+    # DASS-21 concerns the past week and is doctor-only baseline information.
+    # Neither DASS nor a cached legacy six-item check-in enters live routing.
+    questionnaire = None
     sensor_probability = (
         sensor_state.get("sensor_stress_probability")
         if sensor_state.get("sensor_stress_available")
@@ -1086,8 +1199,7 @@ def _text_turn(request: Request, message: str, frames: list[bytes] | None = None
         raise HTTPException(status_code=400, detail="message cannot be empty")
 
     session_id = patient_id(request)
-    with _sensor_lock:
-        sensor_state, sensor_context = _sensor_turn_data(session_id)
+    sensor_state, sensor_context = _require_ready_sensor(session_id)
     multimodal_state, multimodal_context = _multimodal_turn_data(
         session_id, sensor_state
     )
@@ -1163,6 +1275,8 @@ def voice_chat(
     are optional, scored in memory and discarded.
     """
 
+    session_id = patient_id(request)
+    _require_ready_sensor(session_id)
     content_type = (audio.content_type or "").lower()
     if content_type and not (
         content_type.startswith("audio/") or content_type == "application/octet-stream"
@@ -1201,9 +1315,9 @@ def voice_chat(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Voice analysis failed: {exc}") from exc
 
-    session_id = patient_id(request)
-    with _sensor_lock:
-        sensor_state, sensor_context = _sensor_turn_data(session_id)
+    # Recheck after audio analysis in case the doctor disconnected or
+    # recalibrated the sensor while transcription was running.
+    sensor_state, sensor_context = _require_ready_sensor(session_id)
     multimodal_state, multimodal_context = _multimodal_turn_data(
         session_id,
         sensor_state,
@@ -1378,7 +1492,7 @@ def _xai_coverage(
         item(
             "Wellbeing fusion",
             "explained" if response.get("combined") else "unavailable",
-            "The displayed contribution is the actual 60% questionnaire + 40% wearable weighting."
+            "Contributions use the saved source weights; DASS-21 is a separate past-week assessment."
             if response.get("combined")
             else "There were no available signals to combine for this turn.",
         ),
@@ -1562,7 +1676,7 @@ def explain_chat(payload: XAIRequest, request: Request) -> dict:
                 "target": "stressed" if target_stressed else "calm",
                 "method": (
                     "Availability-normalized weighted late fusion "
-                    "(questionnaire 60%, wearable 40%; voice kept separate)"
+                    "(saved source weights; DASS-21 kept separate)"
                 ),
                 "attributions": [
                     {

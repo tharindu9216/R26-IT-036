@@ -114,6 +114,15 @@ class AccountStore:
             return [self.public(row) for row in self.db.execute(
                 "SELECT * FROM accounts WHERE doctor_id = ? AND role = 'patient' ORDER BY name", (doctor_id,))]
 
+    def doctors(self) -> list[dict]:
+        """Minimal contact directory; never expose credentials or patient links."""
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT id, name, email FROM accounts WHERE role = 'doctor' "
+                "ORDER BY name COLLATE NOCASE, email"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def can_access(self, user: dict, patient_id: str) -> bool:
         if user['role'] == 'patient':
             return user['id'] == patient_id

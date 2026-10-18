@@ -37,6 +37,14 @@ export type SensorStatus =
       multimodal_stress_weights?: Record<string, number>;
     };
 
+export interface ChatReadiness {
+  ready: boolean;
+  state: "waiting_for_sensor" | "waiting_for_assessment" | "connecting" | "calibrating" | "warming_up" | "running" | "error" | "stopped" | "stalled";
+  message: string;
+  calibration_remaining_seconds: number;
+  warmup_remaining_seconds: number;
+}
+
 export interface SupportContact {
   name: string;
   phone: string;
@@ -47,6 +55,31 @@ export interface QuestionnaireStatus {
   completed: boolean;
   stress?: boolean;
   stress_probability?: number;
+}
+
+export interface DASS21Form {
+  version: string;
+  title: string;
+  timeframe: string;
+  instructions: string;
+  questions: { id: string; text: string }[];
+  options: { value: number; label: string }[];
+}
+
+export interface DASS21Status {
+  completed: boolean;
+  assessment_id?: string;
+  completed_at?: number;
+  valid_until?: number;
+}
+
+export type DASS21Scale = "depression" | "anxiety" | "stress";
+export interface DASS21Assessment {
+  assessment_id: string;
+  version: string;
+  completed_at: number;
+  answers: Record<string, number>;
+  scores: Record<DASS21Scale, { raw_score: number; score: number; severity: string }>;
 }
 
 export type ModelLoadState = "pending" | "loading" | "ready" | "error";
@@ -216,6 +249,12 @@ export interface Account {
 export interface PatientSummary extends Account {
   message_count: number;
   latest_activity: number | null;
+}
+
+export interface DoctorSummary {
+  id: string;
+  name: string;
+  email: string;
 }
 
 export type StressSourceKey = "combined" | "questionnaire" | "sensor" | "text" | "voice" | "face";
