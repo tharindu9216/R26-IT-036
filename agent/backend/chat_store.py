@@ -18,6 +18,7 @@ import json
 import sqlite3
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +61,16 @@ CREATE TABLE IF NOT EXISTS turn_metrics (
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS turn_metrics_by_session ON turn_metrics (session_id, created_at);
+-- Assessments are clinical-review history, independent of chat TTL/New chat.
+CREATE TABLE IF NOT EXISTS dass21_assessments (
+    assessment_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    answers TEXT NOT NULL,
+    scores TEXT NOT NULL,
+    completed_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS dass21_by_patient ON dass21_assessments (session_id, completed_at);
 """
 
 DEFAULT_SESSION_ID = "default"
@@ -117,6 +128,29 @@ class ChatStore:
     def close(self) -> None:
         with self._lock:
             self._connection.close()
+
+    def save_dass21(self, session_id: str, version: str, answers: dict, scores: dict) -> dict:
+        assessment_id, completed_at = uuid.uuid4().hex, time.time()
+        with self._lock:
+            self._connection.execute(
+                "INSERT INTO dass21_assessments VALUES (?, ?, ?, ?, ?, ?)",
+                (assessment_id, normalize_session_id(session_id), version,
+                 json.dumps(answers), json.dumps(scores), completed_at),
+            )
+            self._connection.commit()
+        return {"assessment_id": assessment_id, "version": version, "answers": answers,
+                "scores": scores, "completed_at": completed_at}
+
+    def dass21_history(self, session_id: str, limit: int = 100) -> list[dict]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT assessment_id, version, answers, scores, completed_at "
+                "FROM dass21_assessments WHERE session_id = ? "
+                "ORDER BY completed_at DESC, rowid DESC LIMIT ?",
+                (normalize_session_id(session_id), max(1, min(limit, 100))),
+            ).fetchall()
+        return [{"assessment_id": row[0], "version": row[1], "answers": json.loads(row[2]),
+                 "scores": json.loads(row[3]), "completed_at": row[4]} for row in rows]
 
     # ------------------------------------------------------------------
     # Writes

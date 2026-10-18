@@ -177,11 +177,11 @@ signal_influence:
 
 # Decision-level fusion used by the stress badge and both conversation paths.
 # Voice appraisal remains a separate C2 signal; the shared stress score is the
-# six-question check-in (60%) plus the C1 wearable (40%). Missing sources are
-# removed and the remaining weights are normalized automatically.
+# C1 wearable. DASS-21 is a separate past-week assessment for the doctor;
+# neither its scores nor legacy check-in answers are fused into live stress.
 multimodal_stress:
-  questionnaire_weight: 0.6
-  sensor_weight: 0.4
+  questionnaire_weight: 0.0
+  sensor_weight: 1.0
   voice_weight: 0.0
   threshold: 0.5
 
@@ -214,15 +214,15 @@ current_emotion:
 # over frozen embeddings from the current-emotion RoBERTa. Blend weights and
 # the decision threshold live in the artifact's own metadata.json (validation-
 # selected; nothing is retuned at load time), so this stays a directory.
-# It is the self-contained export written by model/forcast/export_deployment.py;
-# model/forcast itself is the training tree and has no root metadata.json.
+# The local model/forcast directory contains metadata.json and the baseline,
+# scaler and fusion checkpoints referenced by that metadata.
 #
 # It replaces the 13-label next-emotion forecaster that predicted the next
 # *family*. This one does not: the family is carried over from the current
 # emotion and only the intensity is predicted, so `neutral` turns keep
 # `neutral` as their next state. See backend/README.md.
 next_intensity:
-  artifact_dir: next_intensity_forecaster
+  artifact_dir: forcast
 
 # Reply generation: Qwen base model + the ESConv LoRA adapter, and the
 # generation settings used for every reply regardless of route.

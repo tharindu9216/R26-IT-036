@@ -28,9 +28,33 @@ button:disabled { cursor: wait; opacity: .6; }
 .sharing-panel summary { cursor: pointer; color: var(--sage-dark); font-weight: 600; }
 .sharing-panel p { margin: 16px 0; font-size: 14px; }
 .sharing-panel .portal-form { margin-top: 20px; }
+.care-team-tabs { display: flex; gap: 10px; flex-wrap: wrap; margin: 20px 0 12px; }
+.patient-portal .sharing-panel .care-team-tabs button[aria-selected="true"] { background: var(--sage-dark); color: white; }
+.directory-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 16px 0; }
+.directory-toolbar small { color: var(--text-dim); }
+.doctor-directory { display: grid; gap: 12px; max-height: 360px; overflow-y: auto; }
+.directory-card { display: grid; gap: 8px; border: 1px solid var(--border); border-radius: 14px; padding: 18px; margin: 12px 0; }
+.directory-card > div { display: grid; gap: 5px; min-width: 0; }
+.directory-card span { overflow-wrap: anywhere; color: var(--text-dim); }
+.directory-card small { color: var(--sage-dark); }
+.directory-card.is-selected { border-color: var(--sage-dark); background: var(--sage-pale); }
+.doctor-directory .directory-card { margin: 0; }
+.directory-toolbar button { flex-shrink: 0; font-size: 12px; }
 .check-in { max-width: 740px; margin: 30px auto; text-align: center; }
 .check-in h2 { margin-top: 20px; }
 .check-in-options { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin: 24px 0; }
+.dass-check-in progress { width: 100%; accent-color: var(--sage-dark); }
+.dass-check-in .check-in-options button { text-align: left; line-height: 1.5; }
+.patient-portal .dass-check-in .check-in-options button[aria-pressed="true"] { background: var(--sage-dark); color: white; }
+.dass-navigation { display: flex; justify-content: space-between; gap: 16px; }
+.dass-assessment { margin-top: 20px; border-top: 1px solid var(--border-strong); padding-top: 16px; }
+.dass-assessment summary { cursor: pointer; padding: 8px 0; }
+.dass-assessment li { margin: 16px 0; }
+.dass-table-wrap { overflow-x: auto; margin: 16px 0; }
+.dass-review table { width: 100%; border-collapse: collapse; text-align: left; }
+.dass-review th, .dass-review td { padding: 12px; border-bottom: 1px solid var(--border-strong); }
+.dass-review caption { text-align: left; padding-bottom: 12px; }
+.dass-scale { text-transform: capitalize; }
 .doctor-main { width: min(1320px, calc(100% - 40px)); display: block; margin: 20px auto; }
 .doctor-heading { display: flex; justify-content: space-between; align-items: center; gap: 24px; margin-bottom: 32px; }
 .doctor-heading h1 { font: 38px/1.2 var(--font-display); margin: 10px 0; }
@@ -53,7 +77,7 @@ button:disabled { cursor: wait; opacity: .6; }
 .review-heading h2 { font: 30px var(--font-display); }
 .review-heading p { font-size: 13px; }
 .sharing-badge { background: var(--sage-soft); color: var(--sage-dark); padding: 5px 10px; border-radius: 20px; font-size: 11px; }
-.review-tabs { display: flex; gap: 10px; margin-bottom: 18px; }
+.review-tabs { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
 .review-tabs button[aria-pressed="true"] { background: var(--sage-dark); color: white; }
 .activity-heading { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
 .activity-heading small { color: var(--text-dim); font-size: 11px; }

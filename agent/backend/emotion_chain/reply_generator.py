@@ -258,6 +258,11 @@ class QwenReplyGenerator:
                     "Qwen generation requires transformers, peft and accelerate"
                 ) from exc
 
+            LOGGER.info(
+                "Loading Qwen tokenizer (requested quantization=%s, device=%s) ...",
+                self.quantization,
+                self.device,
+            )
             tokenizer = AutoTokenizer.from_pretrained(
                 self.base_model_dir,
                 local_files_only=True,
@@ -279,10 +284,21 @@ class QwenReplyGenerator:
                 # kernels expect.
                 load_kwargs["torch_dtype"] = torch.float16
                 load_kwargs["quantization_config"] = quantization_config
+            LOGGER.info(
+                "Loading Qwen base weights (load_in_4bit=%s, dtype=%s) ...",
+                bool(getattr(quantization_config, "load_in_4bit", False)),
+                load_kwargs["torch_dtype"],
+            )
             base_model = AutoModelForCausalLM.from_pretrained(
                 self.base_model_dir,
                 **load_kwargs,
             )
+            LOGGER.info(
+                "Qwen base weights loaded: is_loaded_in_4bit=%s, device_map=%s",
+                getattr(base_model, "is_loaded_in_4bit", False),
+                getattr(base_model, "hf_device_map", None),
+            )
+            LOGGER.info("Loading Qwen ESConv adapter ...")
             model = PeftModel.from_pretrained(
                 base_model,
                 self.adapter_dir,
@@ -293,6 +309,7 @@ class QwenReplyGenerator:
             model.eval()
             self._tokenizer = tokenizer
             self._model = model
+            LOGGER.info("Qwen ready for reply generation")
 
     def _signal_influence(self, signals: ReplySignals) -> list[str]:
         """One line per stress source that ran, weighted by how far it counts.

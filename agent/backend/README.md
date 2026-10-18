@@ -6,6 +6,35 @@ Public registration creates patient accounts only. Provision a trusted doctor
 with `python manage_accounts.py doctor --email doctor@example.com --name "Dr. Perera"`.
 Patients explicitly link a doctor by email before that doctor can view activity.
 
+Both web conversation modes require a ready C1 sensor assigned to the patient.
+Calibration must finish and the first prediction must be available before text
+or voice chat starts. `GET /api/chat/readiness` exposes patient-safe waiting
+status and remaining calibration/warm-up time; chat requests return HTTP 409
+while the sensor is missing, calibrating, warming up, stalled or disconnected.
+The doctor can use a live wearable or replay a sensor recording.
+
+Both modes now use the adult English DASS-21 assessment instead of the legacy
+six-item momentary check-in. It asks about the **past week**, retains the
+original 21-item order and 0-3 response anchors, and computes three separate
+scores: depression (3,5,10,13,16,17,21), anxiety (2,4,7,9,15,19,20) and stress
+(1,6,8,11,12,14,18). Each seven-item sum is doubled (0-42) before applying the
+conventional severity bands in the supplied DASS-21 form. These are assessment
+scores, not diagnoses or probabilities.
+
+Patients receive completion metadata only. Linked doctors can review scores,
+severity labels, dates and item responses through the **DASS-21** tab and
+`GET /api/doctor/assessments/dass21`. Every access rechecks the patient link.
+Answers, computed scores, instrument version and completion date are saved in
+`dass21_assessments` in the existing chat SQLite database. They survive backend
+restarts, chat expiry and New chat. A completed assessment is reused by either
+mode for seven days, with an explicit retake option. Chat is blocked until a
+current assessment and the patient's sensor are both ready.
+
+DASS-21 is kept out of live fusion, routing, Qwen prompts and per-turn XAI.
+The live shared stress estimate now uses C1 alone; C2 and C3 retain their
+separate roles. Old six-item endpoints/records remain readable for compatibility
+but cached legacy answers no longer influence new live turns.
+
 The HTTP API now requires its login cookie and, for writes, the
 `X-SentiVera-Client: web` header. Doctor patient-specific reads and sensor actions
 also require `X-Patient-ID` identifying a linked patient. Client `session_id`
@@ -354,3 +383,5 @@ the class-specific intervals are wide.
 Treat the forecast as a reply-conditioning signal and as one weak agreeing
 vote in the escalation rule — never as a clinical assessment or a measured
 intensity. The full report is in `../model/forcast/Evaluation/results/`.
+
+Authenticated patients can read `GET /api/auth/doctors`, which returns registered doctors’ IDs, names and emails only. Browsing does not create a sharing link; `POST /api/auth/doctor` confirms it. `GET /api/doctor/patients` continues to return only patients who linked the signed-in doctor, and unlinking removes access.
